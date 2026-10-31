@@ -6,6 +6,9 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw 'GitHub CLI (gh) is not installed.' }
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git is not installed.' }
+if (-not (Test-Path '.git')) {
+    throw 'Git metadata missing. Clone atelier-telegram-shop.git.bundle rather than using the source-only ZIP.'
+}
 & gh auth status
 if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI is not authenticated.' }
 $login = (& gh api user --jq '.login') -join ''

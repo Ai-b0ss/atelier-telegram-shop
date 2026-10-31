@@ -117,6 +117,13 @@ python -m atelier.backup backups/atelier-2026-10-31.sqlite3
 
 ## Публикация в GitHub
 
+Если проект скачан в виде ZIP, он содержит **только исходники**, без папки `.git`. Для публикации с сохранением истории сначала распакуйте отдельный `atelier-telegram-shop.git.bundle` (два скачанных файла должны находиться рядом), затем в PowerShell выполните:
+
+```powershell
+git clone .\atelier-telegram-shop.git.bundle atelier-telegram-shop
+cd .\atelier-telegram-shop
+```
+
 Репозиторий должен быть **приватным** по умолчанию: в Git никогда не добавляются токены и базы данных. Готова автоматизация однократного создания репозитория и публикации уже зафиксированного коммита:
 
 ```powershell

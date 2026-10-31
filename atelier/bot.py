@@ -339,7 +339,7 @@ async def admin(message: Message):
         return await message.answer("Доступ запрещён.")
     await message.answer("Управление:\n/orders [status] — список\n/status ID status — сменить статус\n"
                          "/order ID — данные заказа\n/quote ID цена себестоимость — смета индивидуального заказа\n"
-                         "/payment ID received|refunded сумма — учёт фактической оплаты/возврата\n"
+                         "/payment ID received|refunded сумма [номер операции] — ручной учёт\n"
                          "/report — Excel-отчёт\n/stats — финансовая сводка\nСтатусы: "+", ".join(STATUSES))
 
 
@@ -467,7 +467,7 @@ async def quote_cmd(message: Message,bot: Bot):
     if len(parts)!=4: return await message.answer("Пример: /quote 12 15000 8000")
     try:
         oid=int(parts[1]); price=money_to_cents(parts[2]); cost=money_to_cents(parts[3]);
-        DB.set_custom_price(oid,price,cost)
+        revision=DB.set_custom_price(oid,price,cost)
     except (ValueError,StoreError) as exc:
         return await message.answer(f"Ошибка сметы: {exc}")
     await message.answer(f"Смета №{oid}: {rub(price)}, себестоимость {rub(cost)}")
@@ -477,8 +477,8 @@ async def quote_cmd(message: Message,bot: Bot):
             await bot.send_message(order["telegram_id"],
                 f"Предложение по индивидуальному заказу №{oid}: {rub(price)}. "
                 "Проверьте цену перед подтверждением. Сроки и детали уточняются у менеджера.",
-                reply_markup=markup(("Согласен с ценой",f"qa:{oid}:{price}"),
-                                    ("Не согласен — отменить заявку",f"qr:{oid}:{price}")))
+                reply_markup=markup(("Согласен с ценой",f"qa:{oid}:{revision}:{price}"),
+                                    ("Не согласен — отменить заявку",f"qr:{oid}:{revision}:{price}")))
         except Exception as exc:
             log.warning("Quote not delivered to customer %s: %s",oid,type(exc).__name__)
             await message.answer("Не удалось доставить предложение клиенту в Telegram; свяжитесь вручную.")
@@ -487,37 +487,31 @@ async def quote_cmd(message: Message,bot: Bot):
 @router.callback_query(F.data.startswith("qa:") | F.data.startswith("qr:"))
 async def quote_decision(call: CallbackQuery,bot: Bot):
     try:
-        action,oid_s,price_s=(call.data or "").split(":")
-        oid, quoted_price=int(oid_s),int(price_s)
-    except (ValueError,TypeError):
-        return await call.answer("Некорректная кнопка",show_alert=True)
-    order=DB.order(oid)
-    if not order or order["telegram_id"]!=call.from_user.id or order["kind"]!="custom":
-        return await call.answer("Вы не можете изменить этот заказ",show_alert=True)
-    if order["status"]!="new" or order["total_cents"]!=quoted_price or quoted_price<=0:
-        return await call.answer("Предложение устарело. Уточните цену у менеджера",show_alert=True)
-    status="confirmed" if action=="qa" else "canceled"
-    try:
-        DB.set_status(oid,status)
-    except StoreError as exc:
-        return await call.answer(str(exc),show_alert=True)
+        action,oid_s,revision_s,price_s=(call.data or "").split(":")
+        if action not in ("qa","qr"):
+            raise ValueError
+        oid,revision,quoted_price=int(oid_s),int(revision_s),int(price_s)
+        status=DB.decide_custom_quote(oid,call.from_user.id,revision,quoted_price,
+                                      accept=(action=="qa"))
+    except (ValueError,StoreError) as exc:
+        return await call.answer(f"Предложение устарело или недоступно: {exc}"[:190],show_alert=True)
     await call.answer("Ответ сохранён")
-    await call.message.answer(f"Ваш ответ по заявке №{oid} принят: {status}.")
+    await call.message.answer(f"Ваш ответ по заявке №{oid} принят: {STATUS_RU[status]}.")
     for admin in ADMINS:
         try: await bot.send_message(admin,f"Ответ клиента по заявке №{oid}: {status}")
         except Exception: log.info("Unable to notify admin about quote response")
-
-
 
 
 @router.message(Command("payment"))
 async def payment_cmd(message: Message):
     if not is_admin(message): return await message.answer("Доступ запрещён.")
     parts=(message.text or "").split()
-    if len(parts)!=4: return await message.answer("Пример: /payment 12 received 1500")
+    if len(parts) not in (4,5):
+        return await message.answer("Пример: /payment 12 received 1500 TXN-2026-001 "
+                                    "(уникальный номер операции необязателен, но рекомендуется)")
     try:
         oid=int(parts[1]); amount=money_to_cents(parts[3]);
-        pid=DB.record_payment(oid,parts[2],amount)
+        pid=DB.record_payment(oid,parts[2],amount,reference=parts[4] if len(parts)==5 else "")
     except (ValueError,StoreError) as exc:
         return await message.answer(f"Ошибка учёта платежа: {exc}")
     await message.answer(f"Записана операция №{pid}: {parts[2]}, {rub(amount)}. Это учёт, не списание денег.")

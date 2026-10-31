@@ -17,3 +17,6 @@ jobs:
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m compileall -q atelier
       - run: python -m pytest -q
+      - run: python -c "import atelier.bot; print('aiogram handlers imported')"
+      - run: python scripts/verify_release.py
+      - run: python -m atelier.demo "${{ runner.temp }}/atelier-demo"

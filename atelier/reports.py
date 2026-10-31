@@ -47,10 +47,10 @@ def make_report(store: Store) -> bytes:
         for col in (5, 6, 7, 8):
             tab.cell(tab.max_row, col).number_format = '#,##0.00 "₽"'
     tab=book.create_sheet("Платежи")
-    tab.append(["№ платежа","№ заказа","Операция","Сумма ₽","Комментарий","Время"])
+    tab.append(["№ платежа","№ заказа","Операция","Сумма ₽","Комментарий","Время","Идентификатор"])
     for p in payments:
         tab.append([p["id"],p["order_id"],p["kind"],p["amount_cents"]/100,
-                    safe_cell(p["note"]),p["created_at"]])
+                    safe_cell(p["note"]),p["created_at"],safe_cell(p["reference"])])
         tab.cell(tab.max_row,4).number_format='#,##0.00 "₽"'
     tab=book.create_sheet("Ассортимент")
     tab.append(["SKU","Товар","Размер","Цвет","Цена ₽","Себестоимость ₽","Остаток","Активен"])

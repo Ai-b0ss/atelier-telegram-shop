@@ -1,2 +1,141 @@
 <?xml version='1.0' encoding='utf-8'?>
-<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_CatalogSales" targetNamespace="https://example.org/atelier" exporter="Atelier Telegram Shop"><bpmn:process id="CatalogSales" name="Продажа изделий из каталога" isExecutable="false"><bpmn:startEvent id="start" name="Начало"><bpmn:outgoing>c1</bpmn:outgoing></bpmn:startEvent><bpmn:task id="browse" name="Просмотр каталога"><bpmn:incoming>c1</bpmn:incoming><bpmn:outgoing>c2</bpmn:outgoing><bpmn:incoming>c8</bpmn:incoming></bpmn:task><bpmn:task id="cart" name="Корзина"><bpmn:incoming>c2</bpmn:incoming><bpmn:outgoing>c3</bpmn:outgoing></bpmn:task><bpmn:task id="contact" name="Контакты и доставка"><bpmn:incoming>c3</bpmn:incoming><bpmn:outgoing>c4</bpmn:outgoing></bpmn:task><bpmn:task id="checkout" name="Создание заказа и списание остатков"><bpmn:incoming>c4</bpmn:incoming><bpmn:outgoing>c5</bpmn:outgoing></bpmn:task><bpmn:exclusiveGateway id="stock" name="Товар в наличии?"><bpmn:incoming>c5</bpmn:incoming><bpmn:outgoing>c6</bpmn:outgoing><bpmn:outgoing>c7</bpmn:outgoing></bpmn:exclusiveGateway><bpmn:task id="retry" name="Изменить заказ"><bpmn:incoming>c7</bpmn:incoming><bpmn:outgoing>c8</bpmn:outgoing></bpmn:task><bpmn:task id="confirmation" name="Подтверждение менеджером"><bpmn:incoming>c6</bpmn:incoming><bpmn:outgoing>c9</bpmn:outgoing></bpmn:task><bpmn:task id="sewing" name="Подготовка изделия"><bpmn:incoming>c9</bpmn:incoming><bpmn:outgoing>c10</bpmn:outgoing></bpmn:task><bpmn:task id="delivery" name="Выдача/доставка"><bpmn:incoming>c10</bpmn:incoming><bpmn:outgoing>c11</bpmn:outgoing></bpmn:task><bpmn:endEvent id="finish" name="Заказ завершён"><bpmn:incoming>c11</bpmn:incoming></bpmn:endEvent><bpmn:sequenceFlow id="c1" sourceRef="start" targetRef="browse" /><bpmn:sequenceFlow id="c2" sourceRef="browse" targetRef="cart" /><bpmn:sequenceFlow id="c3" sourceRef="cart" targetRef="contact" /><bpmn:sequenceFlow id="c4" sourceRef="contact" targetRef="checkout" /><bpmn:sequenceFlow id="c5" sourceRef="checkout" targetRef="stock" /><bpmn:sequenceFlow id="c6" sourceRef="stock" targetRef="confirmation" /><bpmn:sequenceFlow id="c7" sourceRef="stock" targetRef="retry" /><bpmn:sequenceFlow id="c8" sourceRef="retry" targetRef="browse" /><bpmn:sequenceFlow id="c9" sourceRef="confirmation" targetRef="sewing" /><bpmn:sequenceFlow id="c10" sourceRef="sewing" targetRef="delivery" /><bpmn:sequenceFlow id="c11" sourceRef="delivery" targetRef="finish" /></bpmn:process><bpmndi:BPMNDiagram id="Diagram_CatalogSales"><bpmndi:BPMNPlane id="Plane_CatalogSales" bpmnElement="CatalogSales"><bpmndi:BPMNShape id="start_di" bpmnElement="start"><dc:Bounds x="40" y="170" width="36" height="36" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="browse_di" bpmnElement="browse"><dc:Bounds x="125" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="cart_di" bpmnElement="cart"><dc:Bounds x="305" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="contact_di" bpmnElement="contact"><dc:Bounds x="485" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="checkout_di" bpmnElement="checkout"><dc:Bounds x="665" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="stock_di" bpmnElement="stock"><dc:Bounds x="850" y="160" width="50" height="50" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="retry_di" bpmnElement="retry"><dc:Bounds x="960" y="295" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="confirmation_di" bpmnElement="confirmation"><dc:Bounds x="960" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="sewing_di" bpmnElement="sewing"><dc:Bounds x="1140" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="delivery_di" bpmnElement="delivery"><dc:Bounds x="1320" y="150" width="130" height="76" /></bpmndi:BPMNShape><bpmndi:BPMNShape id="finish_di" bpmnElement="finish"><dc:Bounds x="1510" y="170" width="36" height="36" /></bpmndi:BPMNShape><bpmndi:BPMNEdge id="c1_di" bpmnElement="c1"><di:waypoint x="76" y="188.0" /><di:waypoint x="125" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c2_di" bpmnElement="c2"><di:waypoint x="255" y="188.0" /><di:waypoint x="305" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c3_di" bpmnElement="c3"><di:waypoint x="435" y="188.0" /><di:waypoint x="485" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c4_di" bpmnElement="c4"><di:waypoint x="615" y="188.0" /><di:waypoint x="665" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c5_di" bpmnElement="c5"><di:waypoint x="795" y="188.0" /><di:waypoint x="850" y="185.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c6_di" bpmnElement="c6"><di:waypoint x="900" y="185.0" /><di:waypoint x="960" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c7_di" bpmnElement="c7"><di:waypoint x="900" y="185.0" /><di:waypoint x="960" y="333.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c8_di" bpmnElement="c8"><di:waypoint x="1025.0" y="295" /><di:waypoint x="190.0" y="226" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c9_di" bpmnElement="c9"><di:waypoint x="1090" y="188.0" /><di:waypoint x="1140" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c10_di" bpmnElement="c10"><di:waypoint x="1270" y="188.0" /><di:waypoint x="1320" y="188.0" /></bpmndi:BPMNEdge><bpmndi:BPMNEdge id="c11_di" bpmnElement="c11"><di:waypoint x="1450" y="188.0" /><di:waypoint x="1510" y="188.0" /></bpmndi:BPMNEdge></bpmndi:BPMNPlane></bpmndi:BPMNDiagram></bpmn:definitions>
+<ns0:definitions xmlns:ns0="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:ns1="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:ns2="http://www.omg.org/spec/DD/20100524/DC" xmlns:ns3="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_CatalogSales" targetNamespace="https://example.org/atelier" exporter="Atelier Telegram Shop">
+  <ns0:process id="CatalogSales" name="Продажа изделий из каталога" isExecutable="false">
+    <ns0:startEvent id="start" name="Начало">
+      <ns0:outgoing>c1</ns0:outgoing>
+    </ns0:startEvent>
+    <ns0:task id="browse" name="Просмотр каталога">
+      <ns0:incoming>c1</ns0:incoming>
+      <ns0:outgoing>c2</ns0:outgoing>
+      <ns0:incoming>c8</ns0:incoming>
+    </ns0:task>
+    <ns0:task id="cart" name="Корзина">
+      <ns0:incoming>c2</ns0:incoming>
+      <ns0:outgoing>c3</ns0:outgoing>
+    </ns0:task>
+    <ns0:task id="contact" name="Контакты и доставка">
+      <ns0:incoming>c3</ns0:incoming>
+      <ns0:outgoing>c4</ns0:outgoing>
+    </ns0:task>
+    <ns0:task id="checkout" name="Создание заказа и списание остатков">
+      <ns0:incoming>c4</ns0:incoming>
+      <ns0:outgoing>c5</ns0:outgoing>
+    </ns0:task>
+    <ns0:exclusiveGateway id="stock" name="Оформление заказа выполнено?">
+      <ns0:incoming>c5</ns0:incoming>
+      <ns0:outgoing>c6</ns0:outgoing>
+      <ns0:outgoing>c7</ns0:outgoing>
+    </ns0:exclusiveGateway>
+    <ns0:task id="retry" name="Изменить заказ">
+      <ns0:incoming>c7</ns0:incoming>
+      <ns0:outgoing>c8</ns0:outgoing>
+    </ns0:task>
+    <ns0:task id="confirmation" name="Подтверждение менеджером">
+      <ns0:incoming>c6</ns0:incoming>
+      <ns0:outgoing>c9</ns0:outgoing>
+    </ns0:task>
+    <ns0:task id="sewing" name="Подготовка изделия">
+      <ns0:incoming>c9</ns0:incoming>
+      <ns0:outgoing>c10</ns0:outgoing>
+    </ns0:task>
+    <ns0:task id="delivery" name="Выдача/доставка">
+      <ns0:incoming>c10</ns0:incoming>
+      <ns0:outgoing>c11</ns0:outgoing>
+    </ns0:task>
+    <ns0:endEvent id="finish" name="Заказ завершён">
+      <ns0:incoming>c11</ns0:incoming>
+    </ns0:endEvent>
+    <ns0:sequenceFlow id="c1" sourceRef="start" targetRef="browse" />
+    <ns0:sequenceFlow id="c2" sourceRef="browse" targetRef="cart" />
+    <ns0:sequenceFlow id="c3" sourceRef="cart" targetRef="contact" />
+    <ns0:sequenceFlow id="c4" sourceRef="contact" targetRef="checkout" />
+    <ns0:sequenceFlow id="c5" sourceRef="checkout" targetRef="stock" />
+    <ns0:sequenceFlow id="c6" sourceRef="stock" targetRef="confirmation" name="Да" />
+    <ns0:sequenceFlow id="c7" sourceRef="stock" targetRef="retry" name="Нет" />
+    <ns0:sequenceFlow id="c8" sourceRef="retry" targetRef="browse" />
+    <ns0:sequenceFlow id="c9" sourceRef="confirmation" targetRef="sewing" />
+    <ns0:sequenceFlow id="c10" sourceRef="sewing" targetRef="delivery" />
+    <ns0:sequenceFlow id="c11" sourceRef="delivery" targetRef="finish" />
+  </ns0:process>
+  <ns1:BPMNDiagram id="Diagram_CatalogSales">
+    <ns1:BPMNPlane id="Plane_CatalogSales" bpmnElement="CatalogSales">
+      <ns1:BPMNShape id="start_di" bpmnElement="start">
+        <ns2:Bounds x="40" y="170" width="36" height="36" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="browse_di" bpmnElement="browse">
+        <ns2:Bounds x="125" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="cart_di" bpmnElement="cart">
+        <ns2:Bounds x="305" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="contact_di" bpmnElement="contact">
+        <ns2:Bounds x="485" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="checkout_di" bpmnElement="checkout">
+        <ns2:Bounds x="665" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="stock_di" bpmnElement="stock">
+        <ns2:Bounds x="850" y="160" width="50" height="50" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="retry_di" bpmnElement="retry">
+        <ns2:Bounds x="960" y="295" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="confirmation_di" bpmnElement="confirmation">
+        <ns2:Bounds x="960" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="sewing_di" bpmnElement="sewing">
+        <ns2:Bounds x="1140" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="delivery_di" bpmnElement="delivery">
+        <ns2:Bounds x="1320" y="150" width="130" height="76" />
+      </ns1:BPMNShape>
+      <ns1:BPMNShape id="finish_di" bpmnElement="finish">
+        <ns2:Bounds x="1510" y="170" width="36" height="36" />
+      </ns1:BPMNShape>
+      <ns1:BPMNEdge id="c1_di" bpmnElement="c1">
+        <ns3:waypoint x="76" y="188.0" />
+        <ns3:waypoint x="125" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c2_di" bpmnElement="c2">
+        <ns3:waypoint x="255" y="188.0" />
+        <ns3:waypoint x="305" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c3_di" bpmnElement="c3">
+        <ns3:waypoint x="435" y="188.0" />
+        <ns3:waypoint x="485" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c4_di" bpmnElement="c4">
+        <ns3:waypoint x="615" y="188.0" />
+        <ns3:waypoint x="665" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c5_di" bpmnElement="c5">
+        <ns3:waypoint x="795" y="188.0" />
+        <ns3:waypoint x="850" y="185.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c6_di" bpmnElement="c6">
+        <ns3:waypoint x="900" y="185.0" />
+        <ns3:waypoint x="960" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c7_di" bpmnElement="c7">
+        <ns3:waypoint x="900" y="185.0" />
+        <ns3:waypoint x="960" y="333.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c8_di" bpmnElement="c8">
+        <ns3:waypoint x="1025.0" y="295" />
+        <ns3:waypoint x="190.0" y="226" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c9_di" bpmnElement="c9">
+        <ns3:waypoint x="1090" y="188.0" />
+        <ns3:waypoint x="1140" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c10_di" bpmnElement="c10">
+        <ns3:waypoint x="1270" y="188.0" />
+        <ns3:waypoint x="1320" y="188.0" />
+      </ns1:BPMNEdge>
+      <ns1:BPMNEdge id="c11_di" bpmnElement="c11">
+        <ns3:waypoint x="1450" y="188.0" />
+        <ns3:waypoint x="1510" y="188.0" />
+      </ns1:BPMNEdge>
+    </ns1:BPMNPlane>
+  </ns1:BPMNDiagram>
+</ns0:definitions>

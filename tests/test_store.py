@@ -350,3 +350,133 @@ def test_canceled_order_has_no_remaining_payment_due_in_excel(shop):
     wb = load_workbook(BytesIO(make_report(shop)))
     assert wb["Заказы"]["E2"].value == 15000
     assert wb["Заказы"]["H2"].value == 0
+
+
+def test_custom_quote_revision_rejects_older_button_even_for_same_price(shop):
+    cid = client(shop, 8899)
+    oid = shop.custom_order(cid, "Вера", "@vera", "Самовывоз",
+                            "Индивидуальное льняное платье", "Рост 168 см")
+    v1 = shop.set_custom_price(oid, 1200000, 350000)
+    v2 = shop.set_custom_price(oid, 1200000, 350000)
+    assert (v1, v2) == (1, 2)
+    with pytest.raises(StoreError, match="устарело"):
+        shop.decide_custom_quote(oid, 8899, v1, 1200000, accept=True)
+    assert shop.order(oid)["status"] == "new"
+    with pytest.raises(StoreError):
+        shop.decide_custom_quote(oid, 9999, v2, 1200000, accept=True)
+    with pytest.raises(StoreError):
+        shop.decide_custom_quote(oid, 8899, v2, 1300000, accept=True)
+    assert shop.decide_custom_quote(oid, 8899, v2, 1200000, accept=True) == "confirmed"
+    with pytest.raises(StoreError):
+        shop.decide_custom_quote(oid, 8899, v2, 1200000, accept=False)
+    with shop.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM status_history WHERE order_id=?", (oid,)).fetchone()[0] == 2
+
+
+def test_custom_quote_concurrent_decisions_only_one_wins(shop):
+    cid = client(shop, 991)
+    oid = shop.custom_order(cid, "Алиса", "@alice", "Самовывоз",
+                            "Худи с индивидуальной вышивкой", "нужна консультация")
+    rev = shop.set_custom_price(oid, 450000, 250000)
+
+    def choose(accept):
+        try:
+            return shop.decide_custom_quote(oid, 991, rev, 450000, accept=accept)
+        except StoreError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        decisions = list(pool.map(choose, [True, False]))
+    assert sum(d is not None for d in decisions) == 1
+    assert shop.order(oid)["status"] in ("confirmed", "canceled")
+    with shop.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM status_history WHERE order_id=?", (oid,)).fetchone()[0] == 2
+
+
+def test_custom_quote_rejection_requires_refund(shop):
+    cid = client(shop, 677)
+    oid = shop.custom_order(cid, "Аня", "@anna", "Самовывоз",
+                            "Пальто с индивидуальным рисунком", "рост 165")
+    rev = shop.set_custom_price(oid, 550000, 200000)
+    shop.record_payment(oid, "received", 150000)
+    with pytest.raises(StoreError, match="возврат"):
+        shop.decide_custom_quote(oid, 677, rev, 550000, accept=False)
+    shop.record_payment(oid, "refunded", 150000)
+    assert shop.decide_custom_quote(oid, 677, rev, 550000, accept=False) == "canceled"
+
+
+def test_payment_transaction_references_prevent_duplicate_receipts(shop):
+    cid = client(shop, 455)
+    shop.add_to_cart(cid, first_variant(shop))
+    oid = shop.checkout(cid, "Ира", "@ira", "Самовывоз")
+    price = shop.order(oid)["total_cents"]
+    pid = shop.record_payment(oid, "received", price // 2, reference="BANK-20261031-01")
+    assert isinstance(pid, int)
+    with pytest.raises(StoreError, match="уже учтена"):
+        shop.record_payment(oid, "received", price // 2, reference="BANK-20261031-01")
+    with pytest.raises(StoreError, match="Идентификатор"):
+        shop.record_payment(oid, "received", 1, reference="invalid reference")
+    assert shop.analytics()["net_receipts_cents"] == price // 2
+    wb = load_workbook(BytesIO(make_report(shop)))
+    assert wb["Платежи"]["G2"].value == "BANK-20261031-01"
+
+
+def test_upgrade_legacy_database_preserves_orders_and_adds_new_columns(tmp_path):
+    from atelier.store import SCHEMA
+    path = tmp_path / "old.sqlite3"
+    old_schema = SCHEMA.replace(
+        " quote_revision INTEGER NOT NULL DEFAULT 0 CHECK(quote_revision>=0),\n", ""
+    ).replace(
+        " note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,\n reference TEXT NOT NULL DEFAULT ''",
+        " note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL"
+    )
+    with sqlite3.connect(path) as old:
+        old.executescript(old_schema)
+        old.execute("INSERT INTO customers(telegram_id,name,created_at,updated_at) "
+                    "VALUES(100,'Тест','2026-10-01','2026-10-01')")
+        old.execute("INSERT INTO orders(customer_id,kind,contact_name,contact_phone,"
+                    "delivery_address,created_at,updated_at) "
+                    "VALUES(1,'custom','Тест','@test','Самовывоз','2026-10-01','2026-10-01')")
+    upgraded = Store(path)
+    assert upgraded.order(1)["quote_revision"] == 0
+    assert upgraded.order(1)["contact_name"] == "Тест"
+    rev = upgraded.set_custom_price(1, 250000, 100000)
+    assert rev == 1
+    upgraded.record_payment(1, "received", 100000, reference="BANK-OLD-01")
+    with upgraded.connection() as db:
+        assert db.execute("SELECT reference FROM payments").fetchone()[0] == "BANK-OLD-01"
+    # Subsequent startups cannot erase or re-run migrations destructively.
+    assert Store(path).order(1)["quote_revision"] == 1
+
+
+def test_privacy_erasure_scrubs_payment_note_while_preserving_amount_and_reference(shop):
+    cid = client(shop, 12345)
+    shop.add_to_cart(cid, first_variant(shop))
+    oid = shop.checkout(cid, "Женя", "+79005555555", "Дом 5")
+    amount = shop.order(oid)["total_cents"]
+    shop.record_payment(oid, "received", amount, note="Адрес: Дом 5", reference="ACQ-12345")
+    for step in ("confirmed", "ready", "completed"):
+        shop.set_status(oid, step)
+    assert shop.anonymize_customer(12345)
+    with shop.connection() as db:
+        result = db.execute("SELECT note,amount_cents,reference FROM payments WHERE order_id=?", (oid,)).fetchone()
+        assert result["note"] == ""
+        assert result["amount_cents"] == amount
+        assert result["reference"] == "ACQ-12345"
+
+
+def test_demo_artifacts_generated_from_synthetic_transactions(tmp_path):
+    from atelier.demo import build_demo
+    dest = tmp_path / "synthetic"
+    database, report, stats = build_demo(dest)
+    assert database.is_file() and report.is_file()
+    assert stats["order_count"] == 3
+    assert stats["completed_revenue_cents"] > 0
+    assert stats["net_receipts_cents"] > 0
+    store = Store(database)
+    assert [o["status"] for o in store.list_orders()] == ["canceled", "in_production", "completed"]
+    wb = load_workbook(report)
+    assert len(list(wb["Платежи"].rows)) == 5  # 1 header + 4 operations
+    assert [row[1].value for row in list(wb["Заказы"].rows)[1:]] == [20260001, 20260002, 20260003]
+    with pytest.raises(FileExistsError):
+        build_demo(dest)

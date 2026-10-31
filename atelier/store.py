@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS orders (
  status TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','confirmed','in_production','ready','shipped','completed','canceled')),
  total_cents INTEGER NOT NULL DEFAULT 0 CHECK(total_cents>=0),
  cost_cents INTEGER NOT NULL DEFAULT 0 CHECK(cost_cents>=0),
+ quote_revision INTEGER NOT NULL DEFAULT 0 CHECK(quote_revision>=0),
  contact_name TEXT NOT NULL, contact_phone TEXT NOT NULL, delivery_address TEXT NOT NULL,
  custom_details TEXT NOT NULL DEFAULT '', custom_measurements TEXT NOT NULL DEFAULT '',
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -67,7 +68,8 @@ CREATE TABLE IF NOT EXISTS payments (
  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id),
  kind TEXT NOT NULL CHECK(kind IN ('received','refunded')),
  amount_cents INTEGER NOT NULL CHECK(amount_cents>0),
- note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+ note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+ reference TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS status_history (
  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id),
@@ -111,6 +113,13 @@ class Store:
     def init(self) -> None:
         with self.connection() as db:
             db.executescript(SCHEMA)
+            # Additive migrations preserve existing data from previously shipped MVPs.
+            if "quote_revision" not in {r["name"] for r in db.execute("PRAGMA table_info(orders)")}:
+                db.execute("ALTER TABLE orders ADD COLUMN quote_revision INTEGER NOT NULL DEFAULT 0")
+            if "reference" not in {r["name"] for r in db.execute("PRAGMA table_info(payments)")}:
+                db.execute("ALTER TABLE payments ADD COLUMN reference TEXT NOT NULL DEFAULT ''")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_reference "
+                       "ON payments(reference) WHERE reference<>''")
             db.execute("PRAGMA journal_mode=WAL")
 
     def customer(self, tg_id: int, name: str = "", username: str = "") -> int:
@@ -245,7 +254,7 @@ class Store:
             return db.execute("SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id "
                               "WHERE (? IS NULL OR o.status=?) ORDER BY o.id DESC LIMIT ?",(status,status,limit)).fetchall()
 
-    def set_custom_price(self, order_id: int, total_cents: int, cost_cents: int) -> None:
+    def set_custom_price(self, order_id: int, total_cents: int, cost_cents: int) -> int:
         if total_cents <= 0 or cost_cents < 0 or total_cents > 100_000_000_00:
             raise StoreError("Некорректная цена или себестоимость")
         with self.connection() as db:
@@ -255,8 +264,39 @@ class Store:
                 raise StoreError("Смета задаётся только новому индивидуальному заказу")
             if db.execute("SELECT COUNT(*) FROM payments WHERE order_id=?",(order_id,)).fetchone()[0]:
                 raise StoreError("Нельзя менять цену после записи платежей")
-            db.execute("UPDATE orders SET total_cents=?,cost_cents=?,updated_at=? WHERE id=?",
-                       (total_cents,cost_cents,now(),order_id))
+            db.execute("UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=quote_revision+1,"
+                       "updated_at=? WHERE id=?", (total_cents,cost_cents,now(),order_id))
+            return int(db.execute("SELECT quote_revision FROM orders WHERE id=?", (order_id,)).fetchone()[0])
+
+    def decide_custom_quote(self, order_id: int, telegram_id: int, revision: int,
+                            quoted_price_cents: int, *, accept: bool) -> str:
+        """Atomically approve/reject the exact quote the customer actually saw.
+
+        Identity, quote version, amount and status are checked under the same
+        SQLite write lock as the resulting state transition. A stale button
+        cannot approve a different price even under concurrent repricing.
+        """
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            order = db.execute("SELECT o.status,o.kind,o.total_cents,o.quote_revision "
+                               "FROM orders o JOIN customers c ON c.id=o.customer_id "
+                               "WHERE o.id=? AND c.telegram_id=?", (order_id,telegram_id)).fetchone()
+            if (not order or order["kind"] != "custom" or order["status"] != "new"
+                    or order["quote_revision"] != revision or revision < 1
+                    or order["total_cents"] != quoted_price_cents or quoted_price_cents <= 0):
+                raise StoreError("Предложение недоступно или устарело; запросите новую смету")
+            target = "confirmed" if accept else "canceled"
+            if not accept:
+                net = db.execute("SELECT COALESCE(SUM(CASE kind WHEN 'received' THEN amount_cents "
+                                 "ELSE -amount_cents END),0) FROM payments WHERE order_id=?",
+                                 (order_id,)).fetchone()[0]
+                if net:
+                    raise StoreError("Перед отменой нужен возврат полученной оплаты")
+            stamp = now()
+            db.execute("UPDATE orders SET status=?,updated_at=? WHERE id=?", (target,stamp,order_id))
+            db.execute("INSERT INTO status_history(order_id,old_status,new_status,created_at) "
+                       "VALUES(?,'new',?,?)", (order_id,target,stamp))
+            return target
 
     def set_status(self, order_id: int, status: str) -> None:
         if status not in STATUSES:
@@ -288,9 +328,12 @@ class Store:
             db.execute("INSERT INTO status_history(order_id,old_status,new_status,created_at) VALUES(?,?,?,?)",
                        (order_id,order["status"],status,stamp))
 
-    def record_payment(self, order_id: int, kind: str, amount_cents: int, note: str = "") -> int:
+    def record_payment(self, order_id: int, kind: str, amount_cents: int, note: str = "",
+                       reference: str = "") -> int:
         if kind not in ("received","refunded") or amount_cents<=0 or amount_cents>100_000_000_00:
             raise StoreError("Некорректный тип или сумма платежа")
+        if len(reference) > 100 or any(c.isspace() or not c.isascii() or not (c.isalnum() or c in "-_.:/") for c in reference):
+            raise StoreError("Идентификатор операции: максимум 100 латинских символов, цифр и -_.:/")
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             o=db.execute("SELECT total_cents,status FROM orders WHERE id=?",(order_id,)).fetchone()
@@ -302,8 +345,10 @@ class Store:
                 raise StoreError("Оплата превысит стоимость заказа или цена не установлена")
             if kind=="refunded" and amount_cents>sums:
                 raise StoreError("Возврат превышает полученную сумму")
-            cur=db.execute("INSERT INTO payments(order_id,kind,amount_cents,note,created_at) VALUES(?,?,?,?,?)",
-                           (order_id,kind,amount_cents,note[:300],now()))
+            if reference and db.execute("SELECT 1 FROM payments WHERE reference=?", (reference,)).fetchone():
+                raise StoreError("Операция с этим идентификатором уже учтена")
+            cur=db.execute("INSERT INTO payments(order_id,kind,amount_cents,note,created_at,reference) "
+                           "VALUES(?,?,?,?,?,?)", (order_id,kind,amount_cents,note[:300],now(),reference))
             return int(cur.lastrowid)
 
     def anonymize_customer(self, telegram_id: int) -> bool:
@@ -325,6 +370,10 @@ class Store:
             if open_orders:
                 raise StoreError("У вас есть незавершённые заказы. Сначала закройте их с менеджером")
             db.execute("DELETE FROM cart_items WHERE customer_id=?", (cid,))
+            # Free-text payment notes can accidentally contain a contact or address.
+            # Preserve only the financial facts and explicit bank reference IDs.
+            db.execute("UPDATE payments SET note='' WHERE order_id IN "
+                       "(SELECT id FROM orders WHERE customer_id=?)", (cid,))
             db.execute("UPDATE orders SET contact_name='[удалено]',contact_phone='[удалено]',"
                        "delivery_address='[удалено]',custom_details='',custom_measurements='' "
                        "WHERE customer_id=?", (cid,))

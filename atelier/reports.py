@@ -40,7 +40,7 @@ def make_report(store: Store) -> bytes:
     for o in orders:
         tab.append([o["id"], o["telegram_id"], o["kind"], o["status"], o["total_cents"] / 100,
                     o["cost_cents"] / 100, o["paid_cents"] / 100,
-                    (o["total_cents"] - o["paid_cents"]) / 100,
+                    (0 if o["status"] == "canceled" else o["total_cents"] - o["paid_cents"]) / 100,
                     safe_cell(o["contact_name"]), safe_cell(o["contact_phone"]),
                     safe_cell(o["delivery_address"]), safe_cell(o["custom_details"]),
                     safe_cell(o["custom_measurements"]), o["created_at"]])

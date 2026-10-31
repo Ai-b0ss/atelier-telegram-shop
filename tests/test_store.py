@@ -340,3 +340,13 @@ def test_offline_export_rejects_nonexistent_database(tmp_path):
     with pytest.raises(SystemExit):
         cli([str(dest), "--database", str(tmp_path / "missing.sqlite3")])
     assert not dest.exists()
+
+
+def test_canceled_order_has_no_remaining_payment_due_in_excel(shop):
+    cid = client(shop)
+    oid = shop.custom_order(cid, "Рита", "@rita", "самовывоз", "Платье из атласа по эскизу", "нужны мерки")
+    shop.set_custom_price(oid, 1500000, 550000)
+    shop.set_status(oid, "canceled")
+    wb = load_workbook(BytesIO(make_report(shop)))
+    assert wb["Заказы"]["E2"].value == 15000
+    assert wb["Заказы"]["H2"].value == 0

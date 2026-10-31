@@ -1,4 +1,4 @@
-# Safe one-time publisher: creates a PRIVATE repo and pushes the current Git HEAD.
+# Safe one-time publisher: creates a PUBLIC repo and pushes the current Git HEAD.
 # Does not force-push, alter other repositories, or touch secrets.
 param(
     [string]$Repository = 'Ai-b0ss/atelier-telegram-shop'
@@ -20,10 +20,10 @@ $check = & gh repo view $Repository --json nameWithOwner --jq '.nameWithOwner' 2
 if ($LASTEXITCODE -eq 0) {
     throw "Repository $Repository already exists. Refusing to overwrite it automatically."
 }
-& gh repo create $Repository --private --source '.' --remote origin --push
+& gh repo create $Repository --public --source '.' --remote origin --push
 if ($LASTEXITCODE -ne 0) { throw 'Repository creation or git push failed.' }
 $visibility = (& gh repo view $Repository --json isPrivate --jq '.isPrivate') -join ''
-if ($LASTEXITCODE -ne 0 -or $visibility.Trim() -ne 'true') {
-    throw 'Could not verify that the repository is private.'
+if ($LASTEXITCODE -ne 0 -or $visibility.Trim() -ne 'false') {
+    throw 'Could not verify that the repository is public.'
 }
-Write-Output "Published private repository: https://github.com/$Repository"
+Write-Output "Published public repository: https://github.com/$Repository"

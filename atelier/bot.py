@@ -91,7 +91,9 @@ async def notify_admins(bot: Bot, order_id: int) -> None:
 async def start(message: Message, state: FSMContext):
     await state.clear()
     identity(message)
-    await message.answer("Ателье авторской одежды. Выберите действие:",
+    greeting = ("ДЕМО-РЕЖИМ: тестовые товары, реальные заказы не принимаются.\n"
+                if os.environ.get("DEMO_MODE") == "1" else "")
+    await message.answer(greeting + "Ателье авторской одежды. Выберите действие:",
                          reply_markup=markup(("Каталог", "cats"),("Корзина", "cart"),
                                              ("Индивидуальный пошив", "custom"),("Мои заказы", "mine")))
 
@@ -548,6 +550,10 @@ def main() -> None:
     DB=Store(os.environ.get("DATABASE_PATH","data/atelier.sqlite3"))
     bot=Bot(token=token)
     dp=Dispatcher()
+    if os.environ.get("DEMO_MODE") == "1":
+        from .demo_guard import DemoOnlyMiddleware
+        dp.message.outer_middleware(DemoOnlyMiddleware(ADMINS))
+        dp.callback_query.outer_middleware(DemoOnlyMiddleware(ADMINS))
     dp.include_router(router)
     asyncio.run(dp.start_polling(bot))
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_ALLOWED = frozenset({"BOT_TOKEN", "ADMIN_IDS", "DATABASE_PATH"})
+_ALLOWED = frozenset({"BOT_TOKEN", "ADMIN_IDS", "DATABASE_PATH", "DEMO_MODE"})
 
 
 def load_local_env(path: str | Path = ".env") -> None:

@@ -27,3 +27,8 @@ def load_local_env(path: str | Path = ".env") -> None:
         if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
             value = value[1:-1]
         os.environ.setdefault(name, value)
+
+
+def is_demo_mode() -> bool:
+    """Safe default: unconfigured bot never accepts public orders."""
+    return os.environ.get("DEMO_MODE", "1") != "0"

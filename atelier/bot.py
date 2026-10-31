@@ -5,6 +5,7 @@ import asyncio
 import html
 import logging
 import os
+from pathlib import Path
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -15,7 +16,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message)
 
-from .config import load_local_env
+from .config import load_local_env, is_demo_mode
+from .runtime import AlreadyRunning, exclusive_instance
 from .reports import make_report
 from .store import STATUSES, Store, StoreError
 
@@ -92,7 +94,7 @@ async def start(message: Message, state: FSMContext):
     await state.clear()
     identity(message)
     greeting = ("ДЕМО-РЕЖИМ: тестовые товары, реальные заказы не принимаются.\n"
-                if os.environ.get("DEMO_MODE") == "1" else "")
+                if is_demo_mode() else "")
     await message.answer(greeting + "Ателье авторской одежды. Выберите действие:",
                          reply_markup=markup(("Каталог", "cats"),("Корзина", "cart"),
                                              ("Индивидуальный пошив", "custom"),("Мои заказы", "mine")))
@@ -550,12 +552,18 @@ def main() -> None:
     DB=Store(os.environ.get("DATABASE_PATH","data/atelier.sqlite3"))
     bot=Bot(token=token)
     dp=Dispatcher()
-    if os.environ.get("DEMO_MODE") == "1":
+    if is_demo_mode():
         from .demo_guard import DemoOnlyMiddleware
         dp.message.outer_middleware(DemoOnlyMiddleware(ADMINS))
         dp.callback_query.outer_middleware(DemoOnlyMiddleware(ADMINS))
     dp.include_router(router)
-    asyncio.run(dp.start_polling(bot))
+    # Do not let two workers consume Telegram updates simultaneously.
+    lock_file = Path(DB.path).with_suffix(".polling.lock")
+    try:
+        with exclusive_instance(lock_file):
+            asyncio.run(dp.start_polling(bot))
+    except AlreadyRunning as exc:
+        raise SystemExit(f"Bot is already running: {exc}") from None
 
 
 if __name__ == "__main__":

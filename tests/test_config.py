@@ -29,3 +29,15 @@ def test_local_env_absence_is_safe(tmp_path, monkeypatch):
     load_local_env(tmp_path / ".env")
     import os
     assert "BOT_TOKEN" not in os.environ
+
+
+def test_demo_mode_fails_closed_without_explicit_production_approval(monkeypatch):
+    from atelier.config import is_demo_mode
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    assert is_demo_mode() is True
+    monkeypatch.setenv("DEMO_MODE", "1")
+    assert is_demo_mode() is True
+    monkeypatch.setenv("DEMO_MODE", "unexpected")
+    assert is_demo_mode() is True
+    monkeypatch.setenv("DEMO_MODE", "0")
+    assert is_demo_mode() is False

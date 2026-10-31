@@ -129,6 +129,10 @@ def test_full_lifecycle_and_financial_report(shop):
     assert book["Итоги"]["B2"].value==amount/100
     assert book["Платежи"]["D2"].value==amount/100
     assert book["Заказы"]["D2"].value=="completed"
+    assert book["Заказы"]["G2"].value==amount/100
+    assert book["Заказы"]["H2"].value==0
+    assert book["Итоги"]["B3"].value==amount/100
+    assert book["Итоги"]["B5"].value==(amount-cost)/100
 
 
 def test_csv_excel_formula_sanitization(shop):
@@ -137,7 +141,7 @@ def test_csv_excel_formula_sanitization(shop):
     cid=client(shop)
     oid=shop.custom_order(cid,"=HYPERLINK(\"x\")","@a","@somewhere","Пальто с воротником","Сантиметры")
     book=load_workbook(BytesIO(make_report(shop)))
-    cell=book["Заказы"]["G2"]
+    cell=book["Заказы"]["I2"]
     assert cell.data_type=="s" and cell.value.startswith("'=")
 
 
@@ -188,3 +192,151 @@ def test_status_history_has_all_transitions(shop):
     with shop.connection() as db:
         states = db.execute("SELECT old_status,new_status FROM status_history WHERE order_id=? ORDER BY id", (oid,)).fetchall()
     assert [(s[0],s[1]) for s in states] == [(None,"new"),("new","confirmed"),("confirmed","ready")]
+
+
+def test_cancel_after_shipping_does_not_create_phantom_stock(shop):
+    cid = client(shop)
+    vid = first_variant(shop)
+    with shop.connection() as conn:
+        starting = conn.execute("SELECT stock FROM variants WHERE id=?", (vid,)).fetchone()[0]
+    shop.add_to_cart(cid, vid)
+    oid = shop.checkout(cid, "Ирина", "@contact", "Самовывоз")
+    for status in ("confirmed", "ready", "shipped"):
+        shop.set_status(oid, status)
+    shop.set_status(oid, "canceled")
+    with shop.connection() as conn:
+        assert conn.execute("SELECT stock FROM variants WHERE id=?", (vid,)).fetchone()[0] == starting - 1
+    assert shop.order(oid)["status"] == "canceled"
+
+
+def test_financial_figures_do_not_mix_placed_orders_and_receipts(shop):
+    cid = client(shop)
+    vid = first_variant(shop)
+    shop.add_to_cart(cid, vid)
+    first = shop.checkout(cid, "Ирина", "@a", "Самовывоз")
+    price = shop.order(first)["total_cents"]
+    cost = shop.order(first)["cost_cents"]
+    shop.record_payment(first, "received", price // 2)
+    for status in ("confirmed", "ready", "completed"):
+        shop.set_status(first, status)
+    shop.add_to_cart(cid, vid)
+    second = shop.checkout(cid, "Ирина", "@a", "Самовывоз")
+    stats = shop.analytics()
+    assert stats["net_receipts_cents"] == price // 2
+    assert stats["completed_revenue_cents"] == price
+    assert stats["completed_cost_cents"] == cost
+    assert stats["completed_gross_margin_cents"] == price - cost
+    assert stats["active_orders_value_cents"] == price * 2
+    book = load_workbook(BytesIO(make_report(shop)))
+    assert book["Заказы"]["G2"].value == price / 200
+    assert book["Заказы"]["H2"].value == price / 200
+    assert book["Заказы"]["H3"].value == price / 100
+
+
+def test_formula_injection_in_variant_fields(shop):
+    with shop.connection() as conn:
+        cat = conn.execute("SELECT id FROM categories LIMIT 1").fetchone()[0]
+        product = conn.execute("INSERT INTO products(category_id,name) VALUES(?,?)", (cat,"   =1+1")).lastrowid
+        conn.execute("INSERT INTO variants(product_id,sku,size,color,price_cents,cost_cents,stock) "
+                     "VALUES(?,?,?,?,?,?,?)", (product, "=SUM(A1:A10)", "\t+SUM(A1:A10)", "\u200b@SUM(A1:A10)", 100, 20, 1))
+    wb = load_workbook(BytesIO(make_report(shop)))
+    sheet = wb["Ассортимент"]
+    row = sheet.max_row
+    for col in (1,2,3,4):
+        assert sheet.cell(row,col).data_type == "s"
+        assert sheet.cell(row,col).value.startswith("'")
+
+
+def test_concurrent_cancellation_and_status_transition_do_not_double_restock(shop):
+    cid = client(shop)
+    vid = first_variant(shop)
+    shop.add_to_cart(cid, vid)
+    oid = shop.checkout(cid,"Марина","@marina","самовывоз")
+    def cancel():
+        try:
+            shop.set_status(oid,"canceled")
+            return True
+        except StoreError:
+            return False
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: cancel(), range(4)))
+    assert results.count(True)==1
+    with shop.connection() as conn:
+        assert conn.execute("SELECT stock FROM variants WHERE id=?",(vid,)).fetchone()[0]==8
+        assert conn.execute("SELECT COUNT(*) FROM status_history WHERE order_id=? AND new_status='canceled'",(oid,)).fetchone()[0]==1
+
+
+def test_amount_parser_rejects_excessive_numbers():
+    from atelier.manage import money_to_cents
+    with pytest.raises(StoreError):
+        money_to_cents("1e100")
+
+
+def test_privacy_erasure_blocks_open_orders_and_erases_completed(shop):
+    cid = client(shop, 9977)
+    order_id = shop.custom_order(cid, "Лиза", "+79991234567", "Улица Ленина, 1",
+                                 "Пальто по индивидуальным меркам", "Рост 170, талия 64")
+    with pytest.raises(StoreError, match="незавершённые"):
+        shop.anonymize_customer(9977)
+    shop.set_status(order_id, "canceled")
+    assert shop.anonymize_customer(9977)
+    assert not shop.anonymize_customer(9977)
+    with shop.connection() as conn:
+        c = conn.execute("SELECT telegram_id,name,username,phone FROM customers WHERE id=?", (cid,)).fetchone()
+        o = conn.execute("SELECT contact_name,contact_phone,delivery_address,custom_details,custom_measurements "
+                         "FROM orders WHERE id=?", (order_id,)).fetchone()
+        assert c["telegram_id"] == -cid
+        assert c["name"] == "" and c["username"] is None and c["phone"] == ""
+        assert o["contact_phone"] == "[удалено]" and o["custom_measurements"] == ""
+        assert conn.execute("SELECT COUNT(*) FROM status_history WHERE order_id=?", (order_id,)).fetchone()[0] == 2
+    assert shop.customer(9977, "Новая регистрация") != cid
+
+
+def test_privacy_erasure_removes_cart_and_preserves_anonymous_accounting(shop):
+    cid = client(shop, 6006)
+    vid = first_variant(shop)
+    shop.add_to_cart(cid, vid, 1)
+    oid = shop.checkout(cid, "Клиент", "+70000000000", "Самовывоз")
+    amount = shop.order(oid)["total_cents"]
+    shop.record_payment(oid, "received", amount)
+    for status in ("confirmed", "ready", "completed"):
+        shop.set_status(oid, status)
+    shop.add_to_cart(cid, vid, 1)
+    assert shop.anonymize_customer(6006)
+    assert shop.cart(cid) == []
+    assert shop.analytics()["net_receipts_cents"] == amount
+    assert shop.analytics()["completed_revenue_cents"] == amount
+    assert shop.order(oid)["telegram_id"] == -cid
+
+
+def test_backup_is_integral_and_does_not_replace_files(shop, tmp_path):
+    from atelier.backup import backup
+    cid = client(shop)
+    shop.add_to_cart(cid, first_variant(shop))
+    oid = shop.checkout(cid, "Бэкап", "@back", "Самовывоз")
+    path = tmp_path / "backups" / "archive.sqlite3"
+    assert backup(shop.path, path) == path.resolve()
+    from_copy = Store(path)
+    assert from_copy.order(oid)["total_cents"] == shop.order(oid)["total_cents"]
+    with pytest.raises(FileExistsError):
+        backup(shop.path, path)
+    with pytest.raises(ValueError):
+        backup(shop.path, shop.path)
+    assert backup(shop.path, tmp_path / "second.sqlite3").is_file()
+
+
+def test_offline_export_to_excel_and_refusal_to_overwrite(shop, tmp_path):
+    from atelier.export import cli
+    path = tmp_path / "results" / "workbook.xlsx"
+    cli([str(path), "--database", shop.path])
+    assert load_workbook(path).sheetnames == ["Итоги", "Заказы", "Платежи", "Ассортимент"]
+    with pytest.raises(SystemExit):
+        cli([str(path), "--database", shop.path])
+
+
+def test_offline_export_rejects_nonexistent_database(tmp_path):
+    from atelier.export import cli
+    dest = tmp_path / "report.xlsx"
+    with pytest.raises(SystemExit):
+        cli([str(dest), "--database", str(tmp_path / "missing.sqlite3")])
+    assert not dest.exists()

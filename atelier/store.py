@@ -276,7 +276,10 @@ class Store:
                                  "ELSE -amount_cents END),0) FROM payments WHERE order_id=?",(order_id,)).fetchone()[0]
                 if net:
                     raise StoreError("Перед отменой проведите возврат всех полученных платежей")
-                if order["kind"]=="catalog":
+                # Shipping has already transferred the goods out of our custody.
+                # A post-shipment return requires explicit inspection and restocking;
+                # simply canceling the order must not produce phantom inventory.
+                if order["kind"]=="catalog" and order["status"]!="shipped":
                     for item in db.execute("SELECT variant_id,quantity FROM order_items WHERE order_id=?",(order_id,)):
                         if item["variant_id"] is not None:
                             db.execute("UPDATE variants SET stock=stock+? WHERE id=?",(item["quantity"],item["variant_id"]))
@@ -303,19 +306,51 @@ class Store:
                            (order_id,kind,amount_cents,note[:300],now()))
             return int(cur.lastrowid)
 
+    def anonymize_customer(self, telegram_id: int) -> bool:
+        """Erase personal details while retaining anonymized transactional totals.
+
+        Open orders block erasure; a new account row will be created on next /start.
+        Returns False if there was no matching customer.
+        """
+        if telegram_id <= 0:
+            raise StoreError("Некорректный Telegram ID")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            customer = db.execute("SELECT id FROM customers WHERE telegram_id=?", (telegram_id,)).fetchone()
+            if customer is None:
+                return False
+            cid = customer["id"]
+            open_orders = db.execute("SELECT COUNT(*) FROM orders WHERE customer_id=? AND "
+                                     "status NOT IN ('completed','canceled')", (cid,)).fetchone()[0]
+            if open_orders:
+                raise StoreError("У вас есть незавершённые заказы. Сначала закройте их с менеджером")
+            db.execute("DELETE FROM cart_items WHERE customer_id=?", (cid,))
+            db.execute("UPDATE orders SET contact_name='[удалено]',contact_phone='[удалено]',"
+                       "delivery_address='[удалено]',custom_details='',custom_measurements='' "
+                       "WHERE customer_id=?", (cid,))
+            db.execute("UPDATE customers SET telegram_id=?,username=NULL,name='',phone='',updated_at=? "
+                       "WHERE id=?", (-cid, now(), cid))
+            return True
+
     def analytics(self) -> dict[str,int]:
         with self.connection() as db:
             gross=db.execute("SELECT COALESCE(SUM(CASE kind WHEN 'received' THEN amount_cents ELSE -amount_cents END),0) "
                              "FROM payments").fetchone()[0]
             costs=db.execute("SELECT COALESCE(SUM(cost_cents),0) FROM orders WHERE status='completed'").fetchone()[0]
+            earned=db.execute("SELECT COALESCE(SUM(total_cents),0) FROM orders WHERE status='completed'").fetchone()[0]
             placed=db.execute("SELECT COALESCE(SUM(total_cents),0) FROM orders WHERE status!='canceled'").fetchone()[0]
             count=db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-            return {"net_receipts_cents":gross,"completed_cost_cents":costs,"indicative_margin_cents":gross-costs,
+            return {"net_receipts_cents":gross,"completed_revenue_cents":earned,
+                    "completed_cost_cents":costs,"completed_gross_margin_cents":earned-costs,
+                    "indicative_margin_cents":gross-costs,
                     "active_orders_value_cents":placed,"order_count":count}
 
     def export_rows(self) -> tuple[list[sqlite3.Row],list[sqlite3.Row],list[sqlite3.Row]]:
         with self.connection() as db:
-            orders=db.execute("SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id").fetchall()
+            orders=db.execute("SELECT o.*,c.telegram_id,"
+                "COALESCE((SELECT SUM(CASE kind WHEN 'received' THEN amount_cents ELSE -amount_cents END) "
+                "FROM payments WHERE order_id=o.id),0) AS paid_cents "
+                "FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id").fetchall()
             payments=db.execute("SELECT * FROM payments ORDER BY id").fetchall()
             variants=db.execute("SELECT v.*,p.name AS product_name FROM variants v JOIN products p ON p.id=v.product_id ORDER BY v.id").fetchall()
             return orders,payments,variants

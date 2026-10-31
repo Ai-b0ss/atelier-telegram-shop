@@ -11,7 +11,7 @@ from .store import Store
 
 def safe_cell(value: object) -> object:
     """Prevent user input from being interpreted as an Excel formula."""
-    if isinstance(value,str) and value.lstrip().startswith(("=","+","-","@")):
+    if isinstance(value,str) and value.lstrip(" \t\r\n\ufeff\u200b").startswith(("=","+","-","@")):
         return "'"+value
     return value
 
@@ -25,21 +25,27 @@ def make_report(store: Store) -> bytes:
     sh.append(["Показатель","Рубли","Пояснение"])
     for key,label,meaning in [
         ("net_receipts_cents","Получено за вычетом возвратов","Только вручную подтверждённые поступления и возвраты"),
+        ("completed_revenue_cents","Стоимость завершённых заказов","Стоимость отгруженных/выданных и завершённых заказов"),
         ("completed_cost_cents","Себестоимость завершённых заказов","Учётная оценка из карточек товаров или сметы"),
-        ("indicative_margin_cents","Ориентировочная валовая разница","Поступления минус себестоимость завершённых; не бухгалтерская прибыль"),
+        ("completed_gross_margin_cents","Валовая маржа завершённых заказов","Стоимость завершённых заказов минус их себестоимость; до накладных расходов и налогов"),
         ("active_orders_value_cents","Сумма неотменённых заказов","Обязательства, не фактическая выручка"),
     ]:
         sh.append([label,summary[key]/100,meaning])
         sh.cell(sh.max_row,2).number_format='#,##0.00 "₽"'
     sh.append(["Всего заказов",summary["order_count"],"Включая отменённые"])
     tab=book.create_sheet("Заказы")
-    tab.append(["№","Клиент Telegram ID","Тип","Статус","Цена ₽","Себестоимость ₽","Контакт","Телефон","Адрес/доставка","Пожелания","Мерки","Создан"])
+    tab.append(["№", "Клиент Telegram ID", "Тип", "Статус", "Цена ₽", "Себестоимость ₽",
+                "Оплачено ₽", "Остаток к оплате ₽", "Контакт", "Телефон",
+                "Адрес/доставка", "Пожелания", "Мерки", "Создан"])
     for o in orders:
-        tab.append([o["id"],o["telegram_id"],o["kind"],o["status"],o["total_cents"]/100,
-                    o["cost_cents"]/100,safe_cell(o["contact_name"]),safe_cell(o["contact_phone"]),
-                    safe_cell(o["delivery_address"]),safe_cell(o["custom_details"]),
-                    safe_cell(o["custom_measurements"]),o["created_at"]])
-        for col in (5,6): tab.cell(tab.max_row,col).number_format='#,##0.00 "₽"'
+        tab.append([o["id"], o["telegram_id"], o["kind"], o["status"], o["total_cents"] / 100,
+                    o["cost_cents"] / 100, o["paid_cents"] / 100,
+                    (o["total_cents"] - o["paid_cents"]) / 100,
+                    safe_cell(o["contact_name"]), safe_cell(o["contact_phone"]),
+                    safe_cell(o["delivery_address"]), safe_cell(o["custom_details"]),
+                    safe_cell(o["custom_measurements"]), o["created_at"]])
+        for col in (5, 6, 7, 8):
+            tab.cell(tab.max_row, col).number_format = '#,##0.00 "₽"'
     tab=book.create_sheet("Платежи")
     tab.append(["№ платежа","№ заказа","Операция","Сумма ₽","Комментарий","Время"])
     for p in payments:
@@ -49,7 +55,7 @@ def make_report(store: Store) -> bytes:
     tab=book.create_sheet("Ассортимент")
     tab.append(["SKU","Товар","Размер","Цвет","Цена ₽","Себестоимость ₽","Остаток","Активен"])
     for v in variants:
-        tab.append([v["sku"],safe_cell(v["product_name"]),v["size"],safe_cell(v["color"]),
+        tab.append([safe_cell(v["sku"]),safe_cell(v["product_name"]),safe_cell(v["size"]),safe_cell(v["color"]),
                     v["price_cents"]/100,v["cost_cents"]/100,v["stock"],bool(v["active"])])
         for col in (5,6): tab.cell(tab.max_row,col).number_format='#,##0.00 "₽"'
     for ws in book:

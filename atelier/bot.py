@@ -57,7 +57,7 @@ def money_to_cents(s: str) -> int:
         if not d.is_finite() or d<0 or d.as_tuple().exponent < -2:
             raise ValueError
         val=d*100
-        if val != val.to_integral_value():
+        if val > 10_000_000_000 or val != val.to_integral_value():
             raise ValueError
         return int(val)
     except (InvalidOperation, ValueError):
@@ -99,6 +99,44 @@ async def start(message: Message, state: FSMContext):
 async def cancel(message: Message,state: FSMContext):
     await state.clear()
     await message.answer("Ввод отменён. /start — главное меню.")
+
+
+@router.message(Command("privacy"))
+async def privacy_info(message: Message):
+    await message.answer(
+        "Бот хранит Telegram ID, контакты, сведения о заказах и мерках в локальной базе. "
+        "Они доступны только администратору магазина. Финансовые операции учитываются вручную.\n"
+        "/forgetme — запросить удаление персональных сведений. "
+        "Уже закрытые заказы сохранят обезличенные финансовые суммы. "
+        "При незавершённых заказах свяжитесь с менеджером."
+    )
+
+
+@router.message(Command("forgetme"))
+async def forgetme(message: Message):
+    await message.answer(
+        "Удалить контакты, мерки и связи с историей закрытых заказов? "
+        "Это действие необратимо; суммы транзакций останутся обезличенными.",
+        reply_markup=markup(("Да, удалить мои данные", "privacy:delete"),
+                            ("Нет, оставить", "privacy:cancel"))
+    )
+
+
+@router.callback_query(F.data == "privacy:cancel")
+async def privacy_cancel(call: CallbackQuery):
+    await call.answer("Удаление отменено")
+    await call.message.answer("Данные оставлены без изменений.")
+
+
+@router.callback_query(F.data == "privacy:delete")
+async def privacy_delete(call: CallbackQuery, state: FSMContext):
+    try:
+        deleted = DB.anonymize_customer(call.from_user.id)
+    except StoreError as exc:
+        return await call.answer(str(exc)[:190], show_alert=True)
+    await state.clear()
+    await call.answer("Запрос выполнен")
+    await call.message.answer("Персональные данные удалены." if deleted else "Данных для удаления не было.")
 
 
 @router.callback_query(F.data == "cats")
@@ -302,20 +340,52 @@ async def admin(message: Message):
     await message.answer("Управление:\n/orders [status] — список\n/status ID status — сменить статус\n"
                          "/order ID — данные заказа\n/quote ID цена себестоимость — смета индивидуального заказа\n"
                          "/payment ID received|refunded сумма — учёт фактической оплаты/возврата\n"
-                         "/report — Excel-отчёт\nСтатусы: "+", ".join(STATUSES))
+                         "/report — Excel-отчёт\n/stats — финансовая сводка\nСтатусы: "+", ".join(STATUSES))
+
+
+STATUS_RU = {
+    "new": "Новый", "confirmed": "Подтверждён", "in_production": "В работе",
+    "ready": "Готов", "shipped": "Отправлен", "completed": "Завершён",
+    "canceled": "Отменён",
+}
+
+
+def admin_filters() -> InlineKeyboardMarkup:
+    return markup(("Все заказы", "adm:filter:all"),
+                  *((label, f"adm:filter:{status}") for status, label in STATUS_RU.items()))
+
+
+def orders_text(rows: list) -> str:
+    if not rows:
+        return "Заказов с таким статусом нет."
+    lines = [f"№{o['id']} · {STATUS_RU[o['status']]} · {o['kind']} · "
+             f"{rub(o['total_cents'])} · /order {o['id']}" for o in rows]
+    text = "Заказы (до 30 последних):\n" + "\n".join(lines)
+    return text[:3900]
 
 
 @router.message(Command("orders"))
 async def orders_cmd(message: Message):
-    if not is_admin(message): return await message.answer("Доступ запрещён.")
-    args=(message.text or "").split()
+    if not is_admin(message):
+        return await message.answer("Доступ запрещён.")
+    args = (message.text or "").split()
     try:
-        result=DB.list_orders(args[1] if len(args)>1 else None)
+        rows = DB.list_orders(args[1] if len(args) > 1 else None)
     except StoreError as exc:
         return await message.answer(str(exc))
-    if not result: return await message.answer("Заказов нет.")
-    text="\n".join(f"№{o['id']} · {o['status']} · {o['kind']} · {rub(o['total_cents'])} · TG {o['telegram_id']}" for o in result)
-    await message.answer(text[:3900])
+    await message.answer(orders_text(rows), reply_markup=admin_filters())
+
+
+@router.callback_query(F.data.startswith("adm:filter:"))
+async def admin_filter_callback(call: CallbackQuery):
+    if call.from_user.id not in ADMINS:
+        return await call.answer("Доступ запрещён", show_alert=True)
+    status = (call.data or "").removeprefix("adm:filter:")
+    if status != "all" and status not in STATUSES:
+        return await call.answer("Неизвестный статус", show_alert=True)
+    await call.answer()
+    await call.message.answer(orders_text(DB.list_orders(None if status == "all" else status)),
+                              reply_markup=admin_filters())
 
 
 @router.message(Command("order"))
@@ -331,7 +401,31 @@ async def order_details(message: Message):
           f"Клиент: {o['contact_name']}\nКонтакт: {o['contact_phone']}\n"
           f"Получение: {o['delivery_address']}\nПожелания: {o['custom_details']}\n"
           f"Мерки: {o['custom_measurements']}")
-    await message.answer(text[:3900])
+    from .store import TRANSITIONS
+    available = sorted(TRANSITIONS[o["status"]])
+    keyboard = markup(*[(f"→ {STATUS_RU[s]}", f"adm:status:{o['id']}:{s}") for s in available]) if available else None
+    await message.answer(text[:3900], reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("adm:status:"))
+async def admin_change_status(call: CallbackQuery, bot: Bot):
+    if call.from_user.id not in ADMINS:
+        return await call.answer("Доступ запрещён", show_alert=True)
+    try:
+        _, _, oid, status = (call.data or "").split(":", 3)
+        order_id = int(oid)
+        DB.set_status(order_id, status)
+    except (ValueError, StoreError) as exc:
+        return await call.answer(f"Не удалось: {exc}"[:190], show_alert=True)
+    await call.answer("Статус изменён")
+    await call.message.answer(f"Заказ №{order_id}: {STATUS_RU[status]}")
+    order = DB.order(order_id)
+    if order:
+        try:
+            await bot.send_message(order["telegram_id"],
+                                   f"Статус заказа №{order_id}: {STATUS_RU[status]}")
+        except Exception:
+            log.info("Customer notification unavailable for order %s", order_id)
 
 
 @router.message(Command("status"))
@@ -348,6 +442,22 @@ async def status_cmd(message: Message,bot: Bot):
     if order:
         try: await bot.send_message(order["telegram_id"],f"Статус заказа №{oid}: {parts[2]}")
         except Exception: log.info("Customer notification unavailable for order %s",oid)
+
+
+@router.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if not is_admin(message):
+        return await message.answer("Доступ запрещён.")
+    totals = DB.analytics()
+    await message.answer(
+        "Финансовая сводка (ручной учёт):\n"
+        f"Поступления за вычетом возвратов: {rub(totals['net_receipts_cents'])}\n"
+        f"Завершённые заказы (стоимость): {rub(totals['completed_revenue_cents'])}\n"
+        f"Себестоимость завершённых: {rub(totals['completed_cost_cents'])}\n"
+        f"Валовая маржа завершённых: {rub(totals['completed_gross_margin_cents'])}\n"
+        f"Всего заказов: {totals['order_count']}\n"
+        "Без накладных расходов и налогов. Это не бухгалтерская прибыль."
+    )
 
 
 @router.message(Command("quote"))

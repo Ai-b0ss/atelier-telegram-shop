@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 def money_to_cents(text: str) -> int:
     try:
         value = Decimal(text.replace(",", ".")) * 100
-        if not value.is_finite() or value < 0 or value != value.to_integral_value():
+        if not value.is_finite() or value < 0 or value > 10_000_000_000 or value != value.to_integral_value():
             raise ValueError
         return int(value)
     except (InvalidOperation, ValueError):

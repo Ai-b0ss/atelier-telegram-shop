@@ -1,0 +1,26 @@
+name: Cloudflare Worker checks
+
+on:
+  push:
+    paths:
+      - 'cloudflare/**'
+      - '.github/workflows/cloudflare-worker.yml'
+  pull_request:
+    paths:
+      - 'cloudflare/**'
+      - '.github/workflows/cloudflare-worker.yml'
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check worker module syntax
+        run: |
+          node --check cloudflare/src/index.js
+          node --check cloudflare/src/xlsx.js
+      - name: Run webhook and storage integration tests
+        run: node --test cloudflare/test/*.test.mjs

@@ -1,0 +1,11 @@
+{
+  "name": "atelier-cloudflare-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test ./test/*.test.mjs",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "migrate": "wrangler d1 execute atelier-customwear-demo-2026 --remote --file=./schema.sql"
+  }
+}

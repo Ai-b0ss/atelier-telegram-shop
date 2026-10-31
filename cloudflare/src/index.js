@@ -1,0 +1,312 @@
+import { makeXlsx } from "./xlsx.js";
+
+const statuses = ["new","confirmed","in_production","ready","shipped","completed","canceled"];
+const nextStatuses = {
+  new:["confirmed","canceled"], confirmed:["in_production","ready","canceled"],
+  in_production:["ready","canceled"],ready:["shipped","completed","canceled"],
+  shipped:["completed","canceled"],completed:[],canceled:[]
+};
+const ru={new:"Новый",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов",shipped:"Отправлен",completed:"Завершён",canceled:"Отменён"};
+const rub=n=>(Number(n||0)/100).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2})+" ₽";
+const adminIds=env=>new Set(String(env.ADMIN_IDS||"").split(",").map(s=>Number(s.trim())).filter(Number.isSafeInteger));
+const demo=env=>env.DEMO_MODE!=="0";
+const rows=async(db,q,...values)=>(await db.prepare(q).bind(...values).all()).results||[];
+const first=async(db,q,...values)=>await db.prepare(q).bind(...values).first();
+const run=async(db,q,...values)=>await db.prepare(q).bind(...values).run();
+const kb=(entries)=>({inline_keyboard:entries.map(([text,data])=>[{text,callback_data:data}])});
+const safeInt=v=>/^[1-9][0-9]{0,10}$/.test(String(v||""))?Number(v):null;
+const money=v=>{
+  const s=String(v||"").replace(",",".");
+  if(!/^\d{1,8}(?:\.\d{1,2})?$/.test(s))return null;
+  const [a,b=""]=s.split("."); return Number(a)*100+Number((b+"00").slice(0,2));
+};
+const textLimit=(s,n)=>String(s||"").trim().slice(0,n);
+export function makeHandler(env) {
+  const db=env.DB, admins=adminIds(env);
+  async function api(method,payload){
+    const r=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/"+method,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify(payload)
+    });
+    const j=await r.json();
+    if(!r.ok||!j.ok)throw new Error("Telegram method "+method+" failed: "+r.status);
+    return j.result;
+  }
+  const send=(id,text,reply_markup)=>api("sendMessage",{chat_id:id,text:String(text).slice(0,4000),...(reply_markup?{reply_markup}:{})});
+  const answer=(id,text="",show_alert=false)=>api("answerCallbackQuery",{callback_query_id:id,text,show_alert});
+  const notify=async(text)=>{
+    for(const id of admins){try{await send(id,text)}catch(e){console.warn("Admin delivery unavailable")}}
+  };
+  async function customer(u) {
+    await run(db,"INSERT INTO customers(telegram_id,full_name,username) VALUES(?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name,username=excluded.username",
+      u.id,textLimit([u.first_name,u.last_name].filter(Boolean).join(" "),128),textLimit(u.username,64));
+    return await first(db,"SELECT id FROM customers WHERE telegram_id=?",u.id);
+  }
+  const session=async id=>await first(db,"SELECT * FROM sessions WHERE telegram_id=?",id);
+  const setSession=async (id,flow,step,data={})=>run(db,
+    "INSERT INTO sessions(telegram_id,flow,step,payload) VALUES(?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET flow=excluded.flow,step=excluded.step,payload=excluded.payload,updated_at=CURRENT_TIMESTAMP",
+    id,flow,step,JSON.stringify(data));
+  const delSession=id=>run(db,"DELETE FROM sessions WHERE telegram_id=?",id);
+  const home=id=>send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Ателье авторской одежды. Выберите действие:",kb([
+    ["Каталог","cats"],["Корзина","cart"],["Индивидуальный пошив","custom"],["Мои заказы","mine"]
+  ]));
+  async function catalogue(id) {
+    const cs=await rows(db,"SELECT c.id,c.name,COUNT(p.id) AS items FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.active=1 GROUP BY c.id ORDER BY c.name");
+    await send(id,"Категории:",kb([...cs.filter(c=>c.items>0).map(c=>[c.name+" ("+c.items+")","cat:"+c.id]),["Главное меню","home"]]));
+  }
+  async function cart(id,u) {
+    const c=await customer(u);
+    const items=await rows(db,"SELECT c.variant_id,c.quantity,p.name,v.size,v.color,v.price_cents,v.stock FROM cart_items c JOIN variants v ON v.id=c.variant_id JOIN products p ON p.id=v.product_id WHERE c.customer_id=? ORDER BY c.variant_id",c.id);
+    if(!items.length)return send(id,"Корзина пуста.",kb([["Каталог","cats"]]));
+    const total=items.reduce((sum,r)=>sum+r.quantity*r.price_cents,0);
+    await send(id,"Корзина\n"+items.map(x=>x.name+" ("+x.size+", "+x.color+") × "+x.quantity+" — "+rub(x.quantity*x.price_cents)).join("\n")+"\n\nИтого: "+rub(total),
+      kb([...items.map(x=>["Удалить "+x.name,"rm:"+x.variant_id]),["Оформить заказ","checkout"],["Каталог","cats"]]));
+  }
+  async function allMine(id,u){
+    const c=await customer(u);
+    const orders=await rows(db,"SELECT id,kind,status,total_cents FROM orders WHERE customer_id=? ORDER BY id DESC LIMIT 20",c.id);
+    await send(id,orders.length?"Ваши заказы:\n"+orders.map(o=>"№"+o.id+" · "+o.kind+" · "+ru[o.status]+" · "+(o.total_cents?rub(o.total_cents):"цена согласуется")).join("\n"):"Заказов ещё нет.");
+  }
+  async function checkout(id,u,data,addr) {
+    const c=await customer(u);
+    const items=await rows(db,"SELECT ci.quantity,ci.variant_id,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
+    if(!items.length)return send(id,"Корзина пуста или товар больше недоступен.");
+    if(items.some(x=>x.stock<x.quantity))return send(id,"Недостаточно изделий на складе — проверьте корзину.");
+    const total=items.reduce((v,x)=>v+x.quantity*x.price_cents,0),cost=items.reduce((v,x)=>v+x.quantity*x.cost_cents,0);
+    const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,data.name,data.phone,addr);
+    const oid=ins.meta.last_row_id;
+    if(!oid)throw new Error("Order ID unavailable");
+    const statements=items.map(x=>db.prepare("UPDATE variants SET stock=stock-? WHERE id=? AND stock>=?").bind(x.quantity,x.variant_id,x.quantity));
+    const results=await db.batch(statements);
+    if(results.some(v=>v.meta?.changes!==1)) {
+      await run(db,"UPDATE orders SET status='canceled' WHERE id=?",oid);
+      await send(id,"Склад изменился. Заказ отменён, обратитесь к администратору.");
+      return;
+    }
+    await db.batch([
+      ...items.map(x=>db.prepare("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)").bind(oid,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
+      db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
+      db.prepare("INSERT INTO status_history(order_id,new_status) VALUES(?,'new')").bind(oid)
+    ]);
+    await send(id,"Тестовый заказ №"+oid+" создан. Оплата не проводилась.");
+    await notify("Новый демо-заказ №"+oid+" (каталог), сумма "+rub(total)+"\n/admin — управление");
+  }
+  async function createCustom(id,u,data,addr) {
+    const c=await customer(u);
+    const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)",
+      c.id,data.name,data.phone,addr,data.details,data.measures);
+    await send(id,"Тестовая заявка на индивидуальный пошив №"+ins.meta.last_row_id+" получена. Цену и сроки согласует менеджер.");
+    await notify("Новая демо-заявка на пошив №"+ins.meta.last_row_id+". /admin");
+  }
+  async function flowMessage(id,u,text){
+    const s=await session(id);if(!s)return false;
+    let d={};try{d=JSON.parse(s.payload)}catch{}
+    const v=textLimit(text,3000);
+    if(!v){await send(id,"Введите текст или используйте /cancel.");return true}
+    if(s.flow==="checkout"){
+      if(s.step==="name"){d.name=v.slice(0,160);await setSession(id,"checkout","phone",d);await send(id,"Укажите телефон или другой контакт:");return true}
+      if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"checkout","address",d);await send(id,"Адрес доставки или «самовывоз»:");return true}
+      if(s.step==="address"){await delSession(id);await checkout(id,u,d,v.slice(0,300));return true}
+    }
+    if(s.flow==="custom"){
+      if(s.step==="details"){if(v.length<10){await send(id,"Описание должно содержать не меньше 10 символов.");return true}d.details=v;await setSession(id,"custom","measures",d);await send(id,"Укажите мерки или «нужна консультация»:");return true}
+      if(s.step==="measures"){d.measures=v;await setSession(id,"custom","name",d);await send(id,"Ваше имя:");return true}
+      if(s.step==="name"){d.name=v.slice(0,160);await setSession(id,"custom","phone",d);await send(id,"Контактный телефон или Telegram:");return true}
+      if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"custom","address",d);await send(id,"Город и способ получения:");return true}
+      if(s.step==="address"){await delSession(id);await createCustom(id,u,d,v.slice(0,300));return true}
+    }
+    await delSession(id);return false;
+  }
+  async function setStatus(id,order,status){
+    if(!nextStatuses[order.status]?.includes(status))return send(id,"Нельзя перевести заказ из "+ru[order.status]+" в "+(ru[status]||status)+".");
+    if(status==="canceled"){
+      const payments=await rows(db,"SELECT kind,amount_cents FROM payments WHERE order_id=?",order.id);
+      const outstanding=payments.reduce((sum,p)=>sum+(p.kind==="received"?p.amount_cents:-p.amount_cents),0);
+      if(outstanding>0)return send(id,"Сначала зафиксируйте возврат: оплаченный заказ отменять нельзя.");
+    }
+    const res=await run(db,"UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=?",status,order.id,order.status);
+    if(res.meta.changes!==1)return send(id,"Заказ уже изменён. Обновите данные.");
+    await run(db,"INSERT INTO status_history(order_id,old_status,new_status) VALUES(?,?,?)",order.id,order.status,status);
+    if(status==="canceled"&&order.kind==="catalog"){
+      const ii=await rows(db,"SELECT variant_id,quantity FROM order_items WHERE order_id=? AND variant_id IS NOT NULL",order.id);
+      for(const it of ii)await run(db,"UPDATE variants SET stock=stock+? WHERE id=?",it.quantity,it.variant_id);
+    }
+    const c=await first(db,"SELECT telegram_id FROM customers WHERE id=?",order.customer_id);
+    await send(id,"Заказ №"+order.id+": "+ru[status]);
+    if(c&&c.telegram_id!==id)try{await send(c.telegram_id,"Статус заказа №"+order.id+": "+ru[status])}catch{}
+  }
+  async function report(id){
+    const orders=await rows(db,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at FROM orders o ORDER BY o.id DESC LIMIT 1000");
+    const stocks=await rows(db,"SELECT p.name,v.sku,v.size,v.color,v.price_cents,v.cost_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id ORDER BY p.name,v.sku");
+    const payments=await rows(db,"SELECT id,order_id,kind,amount_cents,reference,created_at FROM payments ORDER BY id DESC LIMIT 1000");
+    const totals={orders:orders.length,net:payments.reduce((v,x)=>v+(x.kind==="received"?x.amount_cents:-x.amount_cents),0)};
+    const data=makeXlsx([
+      ["Заказы",["ID","Вид","Статус","Цена коп.","Себестоимость коп.","Имя","Контакт","Доставка","Дата"],orders.map(x=>[x.id,x.kind,x.status,x.total_cents,x.cost_cents,x.contact_name,x.contact_phone,x.delivery_address,x.created_at])],
+      ["Остатки",["Изделие","SKU","Размер","Цвет","Цена коп.","Себестоимость коп.","Остаток"],stocks.map(x=>[x.name,x.sku,x.size,x.color,x.price_cents,x.cost_cents,x.stock])],
+      ["Оплаты",["ID","Заказ","Тип","Сумма коп.","Номер","Дата"],payments.map(x=>[x.id,x.order_id,x.kind,x.amount_cents,x.reference,x.created_at])],
+      ["Итоги",["Показатель","Значение"],[["Количество заказов",totals.orders],["Чистые поступления (коп.)",totals.net],["Режим",demo(env)?"Демо":"Боевой"]]]
+    ]);
+    const body=new FormData();body.append("chat_id",String(id));body.append("caption","Демо-отчёт. Платежи — ручной учёт, не операции банка.");
+    body.append("document",new Blob([data],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"atelier-cloud-report.xlsx");
+    const response=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/sendDocument",{method:"POST",body});
+    if(!response.ok)throw new Error("Excel delivery failed: "+response.status);
+  }
+  async function adminCommand(id,u,txt){
+    const p=txt.split(/\s+/),cmd=p[0].split("@")[0];
+    if(cmd==="/admin")return send(id,"Управление демо:\n/orders — заказы\n/order ID — детали\n/status ID статус — сменить\n/quote ID цена себестоимость — смета\n/payment ID received|refunded сумма [номер] — ручной учёт\n/report — Excel\n/stats — сводка");
+    if(cmd==="/orders"){
+      const filter=p[1],valid=!filter||statuses.includes(filter);
+      if(!valid)return send(id,"Неизвестный статус.");
+      const orders=filter?await rows(db,"SELECT id,kind,status,total_cents FROM orders WHERE status=? ORDER BY id DESC LIMIT 30",filter):await rows(db,"SELECT id,kind,status,total_cents FROM orders ORDER BY id DESC LIMIT 30");
+      return send(id,orders.length?"Заказы:\n"+orders.map(o=>"№"+o.id+" "+ru[o.status]+" "+o.kind+" "+rub(o.total_cents)+" · /order "+o.id).join("\n"):"Заказов нет.");
+    }
+    if(cmd==="/order"){
+      const oid=safeInt(p[1]);if(!oid)return send(id,"Пример: /order 1");
+      const o=await first(db,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",oid);
+      return send(id,o?"№"+o.id+" "+ru[o.status]+" "+o.kind+"\nЦена: "+rub(o.total_cents)+"\nКонтакт: "+o.contact_name+" "+o.contact_phone+"\nДоставка: "+o.delivery_address+"\n"+(o.kind==="custom"?"Пошив: "+o.custom_details+"\nМерки: "+o.custom_measurements:""):"Заказ не найден.");
+    }
+    if(cmd==="/status"){
+      const oid=safeInt(p[1]);const status=p[2];
+      if(!oid||!statuses.includes(status))return send(id,"Пример: /status 1 confirmed");
+      const o=await first(db,"SELECT * FROM orders WHERE id=?",oid);
+      return o?setStatus(id,o,status):send(id,"Заказ не найден.");
+    }
+    if(cmd==="/quote"){
+      const oid=safeInt(p[1]),price=money(p[2]),cost=money(p[3]);
+      if(!oid||price===null||cost===null||price<=0)return send(id,"Пример: /quote 2 8500 3900");
+      const o=await first(db,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",oid);
+      if(!o||o.kind!=="custom"||o.status!=="new")return send(id,"Заявка недоступна для сметы.");
+      const revision=o.quote_revision+1;
+      await run(db,"UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND quote_revision=?",price,cost,revision,oid,o.quote_revision);
+      await send(id,"Смета №"+oid+": "+rub(price)+", себестоимость "+rub(cost));
+      try{await send(o.telegram_id,"Предложение по индивидуальному заказу №"+oid+": "+rub(price)+". Подтвердите цену:",kb([
+        ["Согласен с ценой","qa:"+oid+":"+revision+":"+price],["Отменить заявку","qr:"+oid+":"+revision+":"+price]
+      ]))}catch{await send(id,"Не удалось доставить предложение заказчику.")}
+      return;
+    }
+    if(cmd==="/payment"){
+      const oid=safeInt(p[1]),kind=p[2],amount=money(p[3]),ref=textLimit(p[4]||"",100);
+      if(!oid||!["received","refunded"].includes(kind)||!amount||amount<=0)return send(id,"Пример: /payment 1 received 100 TXN-001");
+      const o=await first(db,"SELECT * FROM orders WHERE id=?",oid);
+      if(!o)return send(id,"Заказ не найден.");
+      if(kind==="received"&&o.status==="canceled")return send(id,"Нельзя записать поступление за отменённый заказ.");
+      const existing=await rows(db,"SELECT kind,amount_cents FROM payments WHERE order_id=?",oid);
+      const net=existing.reduce((a,x)=>a+(x.kind==="received"?x.amount_cents:-x.amount_cents),0);
+      if(kind==="refunded"&&amount>net)return send(id,"Возврат превышает поступления.");
+      try{const ins=await run(db,"INSERT INTO payments(order_id,kind,amount_cents,reference) VALUES(?,?,?,?)",oid,kind,amount,ref);
+        return send(id,"Учётная операция №"+ins.meta.last_row_id+": "+rub(amount)+". Реальные деньги не переводились.")
+      }catch{return send(id,"Не удалось записать операцию: проверьте уникальность номера.")}
+    }
+    if(cmd==="/stats"){
+      const os=await rows(db,"SELECT status,total_cents,cost_cents FROM orders");
+      const ps=await rows(db,"SELECT kind,amount_cents FROM payments");
+      const completed=os.filter(x=>x.status==="completed");
+      return send(id,"Финансовая сводка (ручной учёт):\nПоступления за вычетом возвратов: "+rub(ps.reduce((v,p)=>v+(p.kind==="received"?p.amount_cents:-p.amount_cents),0))+"\nЗавершённые заказы: "+rub(completed.reduce((v,o)=>v+o.total_cents,0))+"\nВаловая маржа: "+rub(completed.reduce((v,o)=>v+o.total_cents-o.cost_cents,0))+"\nВсего заказов: "+os.length);
+    }
+    if(cmd==="/report")return report(id);
+    return send(id,"Неизвестная команда. /admin");
+  }
+  async function callback(cb){
+    const u=cb.from,id=u.id,data=String(cb.data||"");
+    await answer(cb.id);
+    if(data==="home"){await delSession(id);return home(id)}
+    if(data==="cats")return catalogue(id);
+    if(data==="cart")return cart(id,u);
+    if(data==="mine")return allMine(id,u);
+    if(data==="custom"){await setSession(id,"custom","details");return send(id,"Опишите изделие, материал, фасон и цвет (от 10 символов). /cancel — отмена")}
+    if(data==="checkout"){const c=await customer(u);const items=await rows(db,"SELECT variant_id FROM cart_items WHERE customer_id=?",c.id);if(!items.length)return send(id,"Корзина пуста.");await setSession(id,"checkout","name");return send(id,"Как к вам обращаться? /cancel — отмена")}
+    const [action,value,...rest]=data.split(":");const n=safeInt(value);if(!n)return;
+    if(action==="cat"){
+      const ps=await rows(db,"SELECT p.id,p.name,MIN(v.price_cents) AS price FROM products p JOIN variants v ON v.product_id=p.id AND v.active=1 AND v.stock>0 WHERE p.category_id=? AND p.active=1 GROUP BY p.id ORDER BY p.id",n);
+      return send(id,ps.length?"Ассортимент:":"Изделий пока нет.",kb([...ps.map(x=>[x.name+" — от "+rub(x.price),"p:"+x.id]),["Назад","cats"]]));
+    }
+    if(action==="p"){
+      const p=await first(db,"SELECT * FROM products WHERE id=? AND active=1",n);if(!p)return send(id,"Изделие снято с продажи.");
+      const vs=await rows(db,"SELECT * FROM variants WHERE product_id=? AND active=1 AND stock>0 ORDER BY size,color",n);
+      const buttons=kb([...vs.map(v=>[v.size+", "+v.color+" — "+rub(v.price_cents)+" ("+v.stock+" шт.)","add:"+v.id]),["Категории","cats"]]);
+      if(p.photo_file_id)try{return api("sendPhoto",{chat_id:id,photo:p.photo_file_id,caption:p.name+"\n"+p.description,reply_markup:buttons})}catch{}
+      return send(id,p.name+"\n"+p.description+"\nВыберите размер и цвет:",buttons);
+    }
+    if(action==="add"){
+      const c=await customer(u),v=await first(db,"SELECT v.*,p.active AS product_active FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?",n);
+      if(!v||!v.active||!v.product_active||v.stock<=0)return send(id,"Товар закончился.");
+      const cur=await first(db,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,n);
+      if((cur?.quantity||0)+1>v.stock)return send(id,"В наличии меньше товара, чем в корзине.");
+      await run(db,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,1) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=quantity+1",c.id,n);
+      return send(id,"Изделие добавлено.",kb([["Открыть корзину","cart"],["Продолжить покупки","cats"]]));
+    }
+    if(action==="rm"){
+      const c=await customer(u);await run(db,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,n);
+      return cart(id,u);
+    }
+    if(action==="qa"||action==="qr"){
+      const revision=safeInt(rest[0]),price=Number(rest[1]);
+      const o=await first(db,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",n);
+      if(!o||o.kind!=="custom"||o.status!=="new"||o.telegram_id!==id||o.quote_revision!==revision||o.total_cents!==price)return send(id,"Предложение устарело или недоступно.");
+      const st=action==="qa"?"confirmed":"canceled";
+      const res=await run(db,"UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND quote_revision=? AND status='new'",st,n,revision);
+      if(res.meta.changes!==1)return send(id,"Решение уже принято.");
+      await run(db,"INSERT INTO status_history(order_id,old_status,new_status) VALUES(?,'new',?)",n,st);
+      await send(id,"Ваш ответ по заявке №"+n+": "+ru[st]);
+      await notify("Ответ клиента по заявке №"+n+": "+ru[st]);
+    }
+  }
+  async function message(m){
+    const u=m.from,id=m.chat?.id,txt=textLimit(m.text,3500);
+    if(!u||!id||m.chat.type!=="private"||!txt)return;
+    const cmd=txt.split(/\s+/)[0].split("@")[0].toLowerCase();
+    if(cmd==="/start"){await delSession(id);await customer(u);return home(id)}
+    if(cmd==="/cancel"){await delSession(id);return send(id,"Ввод отменён. /start — главное меню.")}
+    if(cmd==="/privacy")return send(id,"Храним данные Telegram, контакты, сведения о заказах и мерках в Cloudflare D1. Данные видны администратору. Оплаты учитываются только вручную. /forgetme — обезличить закрытые заказы.");
+    if(cmd==="/forgetme"){
+      const c=await customer(u);
+      const open=await first(db,"SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status NOT IN ('completed','canceled')",c.id);
+      if(open.n>0)return send(id,"У вас есть незавершённые заказы. Свяжитесь с менеджером для удаления.");
+      await run(db,"UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?",c.id);
+      await run(db,"UPDATE customers SET full_name='',username='' WHERE id=?",c.id);
+      return send(id,"Контакты и мерки в закрытых заказах обезличены.");
+    }
+    if(cmd.startsWith("/")&&["/admin","/orders","/order","/status","/quote","/payment","/report","/stats"].includes(cmd))
+      return admins.has(u.id)?adminCommand(id,u,txt):send(id,"Доступ запрещён.");
+    if(await flowMessage(id,u,txt))return;
+    return send(id,"Используйте /start для выбора услуги; /cancel — отмена.");
+  }
+  return {
+    async handle(update) {
+      if(!env.BOT_TOKEN||!env.DB||!env.WEBHOOK_SECRET)throw new Error("Worker secrets or D1 missing");
+      if(!Number.isSafeInteger(update?.update_id))return;
+      const event=update.message||update.callback_query;
+      if(!event?.from) return;
+      const u=event.from;
+      if(demo(env)&&!admins.has(u.id)){
+        // Do not collect any visitor data or accept orders while the catalogue is synthetic.
+        if(update.callback_query){try{await answer(update.callback_query.id,"Пока только демо для администратора.",true)}catch{}}
+        else if(update.message?.chat?.type==="private")await send(update.message.chat.id,"Магазин пока в тестовом режиме. Реальные заказы не принимаются.");
+        return;
+      }
+      const dedup=await run(db,"INSERT OR IGNORE INTO processed_updates(update_id) VALUES(?)",update.update_id);
+      if(dedup.meta.changes===0)return;
+      try{
+        if(update.callback_query)await callback(update.callback_query);
+        else if(update.message)await message(update.message);
+      }catch(e){
+        await run(db,"DELETE FROM processed_updates WHERE update_id=?",update.update_id);
+        throw e;
+      }
+    }
+  };
+}
+
+export default {
+  async fetch(request, env, context) {
+    const url=new URL(request.url);
+    if(request.method==="GET"&&url.pathname==="/health")
+      return Response.json({ok:true,bot:"atelier",mode:env.DEMO_MODE==="0"?"production":"demo",database:!!env.DB});
+    if(url.pathname!=="/webhook"||request.method!=="POST")return new Response("Not Found",{status:404});
+    if(!env.WEBHOOK_SECRET||request.headers.get("X-Telegram-Bot-Api-Secret-Token")!==env.WEBHOOK_SECRET)
+      return new Response("Forbidden",{status:403});
+    let update;
+    try{update=await request.json()}catch{return new Response("Bad Request",{status:400})}
+    try{await makeHandler(env).handle(update);return new Response("OK")}catch(e){console.error("Webhook handler failed:",e?.message?.replace(env.BOT_TOKEN||"\u0000","[REDACTED]")||"unknown");return new Response("Error",{status:500})}
+  }
+};

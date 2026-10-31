@@ -1,0 +1,19 @@
+{
+  "name": "atelier-customwear-demo-2026",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-15",
+  "workers_dev": true,
+  "observability": {
+    "enabled": false
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "atelier-customwear-demo-2026",
+      "database_id": "4b33cc62-6428-4ea6-bfc6-dfc26bca7af1"
+    }
+  ],
+  "vars": {
+    "DEMO_MODE": "1"
+  }
+}

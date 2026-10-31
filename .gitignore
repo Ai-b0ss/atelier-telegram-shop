@@ -14,3 +14,9 @@ build/
 *.egg-info/
 .venv/
 reports/
+
+# Cloudflare local-only development state
+cloudflare/.wrangler/
+cloudflare/.dev.vars
+cloudflare/.dev.vars.*
+cloudflare/test/test-workbook.xlsx

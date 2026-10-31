@@ -15,6 +15,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message)
 
+from .config import load_local_env
 from .reports import make_report
 from .store import STATUSES, Store, StoreError
 
@@ -533,6 +534,7 @@ async def fallback(message: Message):
 
 def main() -> None:
     global DB,ADMINS
+    load_local_env()
     logging.basicConfig(level=logging.INFO)
     token=os.environ.get("BOT_TOKEN","").strip()
     if not token:

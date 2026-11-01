@@ -435,3 +435,39 @@ test("tailoring submission also rolls back its header on a failed D1 batch",asyn
     assert.equal(db.prepare("SELECT COUNT(*) n FROM checkout_requests").get().n,0);
   }finally{db.close()}
 });
+
+
+test("atomic multi-item checkout links both lines and idempotency to one order",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:2,delta:1})).status,200);
+    const key="atomic_two_lines_123456789";
+    const payload={requestKey:key,name:"Synthetic Multi Buyer",phone:"@fixture",address:"Pickup"};
+    const response=await call(env,"/api/checkout","POST",payload);
+    assert.equal(response.status,200);
+    const {orderId}=await response.json();
+    assert(Number.isSafeInteger(orderId)&&orderId>0);
+    const row=db.prepare("SELECT kind,total_cents,status FROM orders WHERE id=?").get(orderId);
+    assert.equal(row.kind,"catalog");
+    assert.equal(row.status,"new");
+    const lines=db.prepare("SELECT variant_id,quantity FROM order_items WHERE order_id=? ORDER BY variant_id").all(orderId);
+    assert.deepEqual(lines.map(x=>x.variant_id),[1,2]);
+    assert.deepEqual(lines.map(x=>x.quantity),[1,1]);
+    const expected=db.prepare("SELECT SUM(price_cents) AS n FROM variants WHERE id IN(1,2)").get().n;
+    assert.equal(row.total_cents,expected);
+    const idem=db.prepare("SELECT order_id FROM checkout_requests WHERE telegram_id=777 AND request_key=?").get(key);
+    assert.equal(idem.order_id,orderId);
+    const history=db.prepare("SELECT new_status FROM status_history WHERE order_id=?").all(orderId);
+    assert.deepEqual(history.map(x=>x.new_status),["new"]);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,0);
+    const retry=await call(env,"/api/checkout","POST",payload);
+    assert.equal(retry.status,200);
+    assert.deepEqual(await retry.json(),{ok:true,orderId,duplicate:true});
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,2);
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});

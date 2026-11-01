@@ -415,3 +415,23 @@ test("checkout is atomic even if D1 fails and no cleanup query is possible",asyn
     assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
   }finally{db.close()}
 });
+
+
+test("tailoring submission also rolls back its header on a failed D1 batch",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const batch=storage.batch.bind(storage);
+  storage.batch=async statements=>batch([statements[0],
+    storage.prepare("INSERT INTO categories(id,name) VALUES(1,'duplicated-category')")]);
+  try{
+    const response=await call(env,"/api/custom","POST",{
+      requestKey:"atomic_tailoring_fail_123456789",
+      description:"Synthetic custom tailored jacket with lining",
+      measurements:"Chest 100 cm",name:"Synthetic Buyer",
+      phone:"@example",address:"Test pickup"
+    });
+    assert.equal(response.status,409);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM orders").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM checkout_requests").get().n,0);
+  }finally{db.close()}
+});

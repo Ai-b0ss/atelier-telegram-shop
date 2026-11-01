@@ -87,8 +87,12 @@ export async function handleApi(request,env,url){
     const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
     if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
     const c=await getCustomer(env.DB,u);
+    const cartLines=await first(env.DB,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
     const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
-    if(!items.length||items.some(x=>x.stock<x.quantity))return err("Cart empty or stock changed",409);
+    // Never silently omit an archived product: all cart lines must be
+    // available before creating an order for any of them.
+    if(!items.length||items.length!==Number(cartLines?.n||0)||items.some(x=>x.stock<x.quantity))
+      return err("Cart has unavailable items or stock changed. Review the cart.",409);
     const total=items.reduce((n,x)=>n+x.price_cents*x.quantity,0);
     const cost=items.reduce((n,x)=>n+x.cost_cents*x.quantity,0);
     const result=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,name,phone,address);

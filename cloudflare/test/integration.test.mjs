@@ -413,3 +413,43 @@ test('Telegram checkout rejects partial cart when a variant is archived',async()
       "buyer must receive a clear warning about unavailable items");
   }finally{globalThis.fetch=originalFetch;db.close()}
 });
+
+
+test("two simultaneous manual refunds cannot exceed the received amount",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test')");
+  db.exec("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'custom','new')");
+  db.exec("INSERT INTO payments(order_id,kind,amount_cents,reference) VALUES(1,'received',10000,'FAKE-ORIGINAL')");
+  const base=storage.prepare.bind(storage);let arrivals=0,release;
+  const gate=new Promise(r=>{release=r});
+  storage.prepare=sql=>{
+    const stmt=base(sql);
+    if(sql.startsWith("SELECT kind,amount_cents FROM payments WHERE order_id=")){
+      const old=stmt.all.bind(stmt);
+      stmt.all=async()=>{
+        const result=await old();
+        if(++arrivals===2)release();
+        await gate;
+        return result;
+      };
+    }
+    return stmt;
+  };
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  const call=async(id,ref)=>{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(makeUpdate(id,{text:"/payment 1 refunded 80 "+ref}))
+    });
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    const rs=await Promise.all([call(77001,"FAKE-REF-1"),call(77002,"FAKE-REF-2")]);
+    assert(rs.every(x=>x.status===200));
+    const total=db.prepare("SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) AS n FROM payments WHERE order_id=1").get().n;
+    assert(total>=0,"two accepted refund requests cannot push the ledger negative");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM payments WHERE kind='refunded'").get().n,1);
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});

@@ -3,11 +3,15 @@ import {mkdtempSync, readFileSync, mkdirSync, writeFileSync, rmSync} from 'node:
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
-const chrome=process.env.CHROME_PATH||'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const chrome=process.env.CHROME_PATH||(process.platform==='win32'?'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe':'/usr/bin/google-chrome');
 const target=process.env.PREVIEW_URL||'http://127.0.0.1:8769/app';
+const url=new URL(target);
+if(url.protocol!=='http:'||!['localhost','127.0.0.1','[::1]'].includes(url.hostname)) throw Error('Visual QA requires a local HTTP fixture, not a deployed store');
 const dir=resolve('out','visual-qa');mkdirSync(dir,{recursive:true});
 const profile=mkdtempSync(join(tmpdir(),'atelier-visual-'));
-const child=spawn(chrome,['--headless=new','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-extensions','--disable-gpu','--remote-debugging-port=0','--user-data-dir='+profile,'about:blank'],{stdio:'ignore',windowsHide:true});
+const flags=['--headless=new','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-extensions','--disable-gpu','--disable-dev-shm-usage','--remote-debugging-port=0','--user-data-dir='+profile,'about:blank'];
+if(process.platform!=='win32'&&process.getuid?.()===0) flags.push('--no-sandbox');
+const child=spawn(chrome,flags,{stdio:'ignore',windowsHide:true});
 let ws,seq=1;const inflight=new Map();let exceptions=[];
 try{
  let port;
@@ -22,7 +26,7 @@ try{
  await new Promise((res,rej)=>{ws.addEventListener('open',res,{once:true});ws.addEventListener('error',rej,{once:true});});
  ws.addEventListener('message',event=>{
   const msg=JSON.parse(event.data);
-  if(msg.method==='Runtime.exceptionThrown')exceptions.push(msg.params.exceptionDetails.text);
+  if(msg.method==='Runtime.exceptionThrown')exceptions.push(msg.params.exceptionDetails.exception?.description||msg.params.exceptionDetails.text);
   if(msg.id&&inflight.has(msg.id)){
    const [res,rej]=inflight.get(msg.id);inflight.delete(msg.id);msg.error?rej(Error(msg.error.message)):res(msg.result);
   }
@@ -42,7 +46,7 @@ try{
   writeFileSync(join(dir,'editorial-cdp-'+width+'.png'),Buffer.from(shot,'base64'));
   const filtered=await evaluate('(()=>{const b=document.querySelector("[data-cat=\'2\']");if(!b)return null;b.click();return {count:document.querySelectorAll(".product-card").length,title:document.querySelector(".product-card h3")?.textContent};})()');
   const link=await evaluate('(()=>{window.__qaLink=null;window.open=(url)=>{window.__qaLink=url;return null;};if(window.Telegram?.WebApp){try{window.Telegram.WebApp.openTelegramLink=(url)=>{window.__qaLink=url;};}catch{}}document.querySelector(".add-button")?.click();return window.__qaLink;})()');
-  const ok=state?.viewport===width&&state?.scrollWidth<=width+1&&state?.products===3&&state?.bottomNavVisible&&state?.firstCardRight<=width+1&&filtered?.count===1&&link==='https://t.me/atelier_customwear_2611_bot'&&exceptions.length===0&&state?.buttonHeights.every(h=>h>=44);
+  const ok=state?.viewport===width&&state?.scrollWidth<=width+1&&state?.products===3&&state?.bottomNavVisible&&state?.firstCardRight<=width+1&&state?.buttonHeights.length>=10&&state?.buttonHeights.every(h=>h>=44)&&filtered?.count===1&&filtered?.title==='Футболка с принтом'&&link==='https://t.me/atelier_customwear_2611_bot'&&exceptions.length===0;
   report.push({width,ok,state,filtered,link,exceptions});
   console.log(JSON.stringify({width,ok,scrollWidth:state?.scrollWidth,products:state?.products,filtered:filtered?.count,link,firstCardRight:state?.firstCardRight,viewport:state?.viewport,minButton:Math.min(...(state?.buttonHeights??[])),exceptions}));
  }

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {managerUsername,managerUrl,orderDraft,managerKeyboard} from "../src/manager.js";
+import {withGallery} from "../src/api.js";
 
 test("manager username accepts Telegram handles and rejects anything else",()=>{
   assert.equal(managerUsername({MANAGER_USERNAME:"@seller_01"}),"seller_01");
@@ -22,4 +23,13 @@ test("manager link carries an encoded draft with the order contents",()=>{
 test("without a configured manager there is no link and no button",()=>{
   assert.equal(managerUrl({},"text"),null);
   assert.equal(managerKeyboard(null),undefined);
+});
+
+test("storefront gallery passes only local webp paths to the page",()=>{
+  const row=withGallery({images:JSON.stringify(["/products/a-b/front.webp","https://evil.example/x.webp","/products/../x.webp",7]),size_chart:"javascript:alert(1)"});
+  assert.deepEqual(row.images,["/products/a-b/front.webp"]);
+  assert.equal(row.size_chart,null);
+  assert.deepEqual(withGallery({images:"{broken"}).images,[]);
+  assert.deepEqual(withGallery({images:null}).images,[]);
+  assert.equal(withGallery({images:null,size_chart:"/products/a/sizes.webp"}).size_chart,"/products/a/sizes.webp");
 });

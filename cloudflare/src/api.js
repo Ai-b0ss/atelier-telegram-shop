@@ -2,6 +2,15 @@ import {verifyTelegramInitData,isAdmin,demoMode} from "./auth.js";
 import {managerUsername,managerUrl,orderDraft,customDraft} from "./manager.js";
 import {outboxStatements,deliverOutbox,outboxHealth} from "./outbox.js";
 
+const STATIC_PHOTO=/^\/products\/[a-z0-9-]+\/[a-z0-9-]+\.webp$/;
+// Only well-formed local paths reach the page, whatever is stored in the column.
+export function withGallery(row){
+  let images=[];
+  try{images=JSON.parse(row.images||"[]")}catch{}
+  images=Array.isArray(images)?images.filter(x=>typeof x==="string"&&STATIC_PHOTO.test(x)).slice(0,8):[];
+  return {...row,images,size_chart:STATIC_PHOTO.test(row.size_chart||"")?row.size_chart:null};
+}
+
 const json=(data,status=200)=>Response.json(data,{status,headers:{"cache-control":"no-store","x-content-type-options":"nosniff"}});
 const err=(message,status=400)=>json({ok:false,error:message},status);
 const first=(db,sql,...values)=>db.prepare(sql).bind(...values).first();
@@ -71,7 +80,7 @@ export async function handleApi(request,env,url){
   const path=url.pathname;
   if(request.method==="GET"&&path==="/api/catalog"){
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
-    const products=await rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,CASE WHEN p.photo_file_id IS NOT NULL AND p.photo_file_id<>'' THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY p.id LIMIT 150");
+    const products=await rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,p.images,p.size_chart,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY photo_available DESC,p.id LIMIT 150").then(list=>list.map(withGallery));
     const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600");
     return json({ok:true,demo:demoMode(env),manager:managerUsername(env),categories,products,variants});
   }
@@ -86,7 +95,7 @@ export async function handleApi(request,env,url){
 
   if(request.method==="GET"&&path==="/api/cart"){
     const c=await getCustomer(env.DB,u);
-    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.id AS product_id,p.name,CASE WHEN p.photo_file_id IS NOT NULL AND p.photo_file_id<>'' THEN 1 ELSE 0 END AS photo_available,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
+    const items=(await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.id AS product_id,p.name,p.images,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id)).map(withGallery);
     return json({ok:true,items,total_cents:items.reduce((n,x)=>n+x.quantity*x.price_cents,0)});
   }
   if(request.method==="POST"&&path==="/api/cart"){

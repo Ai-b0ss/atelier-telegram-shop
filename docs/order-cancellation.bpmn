@@ -17,11 +17,11 @@
       <bpmn:incoming>f4</bpmn:incoming>
       <bpmn:outgoing>f5</bpmn:outgoing>
     </bpmn:task>
-    <bpmn:task id="cancel" name="Изменить статус на canceled">
+    <bpmn:task id="cancel" name="Статус «Отменён»">
       <bpmn:incoming>f3</bpmn:incoming>
       <bpmn:outgoing>f6</bpmn:outgoing>
     </bpmn:task>
-    <bpmn:exclusiveGateway id="ship" name="Уже отправлен?">
+    <bpmn:exclusiveGateway id="ship" name="Уже передан покупателю?">
       <bpmn:incoming>f6</bpmn:incoming>
       <bpmn:outgoing>f7</bpmn:outgoing>
       <bpmn:outgoing>f9</bpmn:outgoing>
@@ -39,7 +39,7 @@
       <bpmn:outgoing>f11</bpmn:outgoing>
       <bpmn:outgoing>f12</bpmn:outgoing>
     </bpmn:exclusiveGateway>
-    <bpmn:task id="receipt" name="Акт возврата, запас + количество">
+    <bpmn:task id="receipt" name="Акт возврата, остаток растёт">
       <bpmn:incoming>f11</bpmn:incoming>
       <bpmn:outgoing>f13</bpmn:outgoing>
     </bpmn:task>

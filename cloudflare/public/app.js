@@ -42,6 +42,10 @@ async function loadCatalog(){
   renderProducts();
 }
 function renderProducts(){
+  if(!state.catalog){
+    $("products").innerHTML='<div class="card padded empty">Не удалось загрузить коллекцию. <button class="quiet" type="button" data-retry-catalog>Повторить загрузку</button></div>';
+    return;
+  }
   const list=state.catalog.products.filter(p=>!state.category||p.category_id===state.category);
   $("products").innerHTML=list.length?list.map((p,idx)=>{
     const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
@@ -64,7 +68,7 @@ async function loadMe(){
     return;
   }
   const result=await safeRun(()=>api("/api/me"));
-  if(!result)return;
+  if(!result){renderProducts();return;}
   state.me=result;
   if(result.admin){
     $("admin-nav").hidden=false;
@@ -152,7 +156,8 @@ function renderPanel(){
   }
 }
 function field(label,name,value,type="text"){
-  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'" required></label>';
+  const extra=type==="number"?' min="0" step="'+(name==="stock"?"1":"0.01")+'"':"";
+  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'"'+extra+' required></label>';
 }
 function openEditor(kind,id=0,selectedProductId=0){
   if(!state.me?.admin)return;
@@ -188,7 +193,7 @@ function openEditor(kind,id=0,selectedProductId=0){
        (Number(o.return_receipt_count)>0?'<p class="success">Возврат изделия уже учтён.</p>':
         '<div class="return-form"><label>Примечание о приёмке<input name="returnNote" maxlength="300" placeholder="Где и кем получен товар"></label><label class="return-check"><input type="checkbox" name="returnConfirm"> Подтверждаю фактическое получение возвращённого изделия</label><button class="quiet" type="button" data-inventory-return="'+o.id+'">Учесть возврат на склад</button></div>'):"")+
       '<label>Новый статус<select name="status"><option value="">Без изменения</option>'+(next[o.status]||[]).map(st=>'<option value="'+st+'">'+esc(labels[st])+'</option>').join("")+'</select></label>'+
-      (o.kind==="custom"&&o.status==="new"?'<label>Предложить цену, ₽<input type="number" min="1" name="quoteRub" placeholder="Например, 8000"></label><label>Себестоимость, ₽<input type="number" min="0" name="costRub" placeholder="Например, 3400"></label>':'');
+      (o.kind==="custom"&&o.status==="new"?'<label>Предложить цену, ₽<input type="number" min="1" step="0.01" name="quoteRub" placeholder="Например, 8000"></label><label>Себестоимость, ₽<input type="number" min="0" step="0.01" name="costRub" placeholder="Например, 3400"></label>':'');
   }
   dialog.dataset.kind=kind;
   dialog.dataset.id=String(id);
@@ -241,6 +246,7 @@ async function init(){
     });renderProducts();
   });
   $("products").addEventListener("click",e=>{
+    if(e.target.closest("[data-retry-catalog]")){safeRun(loadCatalog);return}
     const select=e.target.closest("[data-choice]");
     if(select){state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);renderProducts();return}
     const add=e.target.closest("[data-add]");
@@ -272,23 +278,30 @@ async function init(){
   });
   $("checkout-form").addEventListener("submit",e=>{
     e.preventDefault();
+    const form=e.currentTarget,submit=form.querySelector('[type="submit"]');
+    if(submit?.disabled)return;
+    if(submit)submit.disabled=true;
     safeRun(async()=>{
       if(!canUse())throw Error("Войдите через Telegram");
-      const form=e.currentTarget,fd=new FormData(form);
+      const fd=new FormData(form);
       state.requestKey ||= crypto.randomUUID().replace(/-/g,"");
       const result=await api("/api/checkout","POST",{requestKey:state.requestKey,name:fd.get("name"),phone:fd.get("phone"),address:fd.get("address")});
       toast("Тестовый заказ №"+result.orderId+" создан");state.requestKey=null;form.reset();await loadCart();go("catalog");
-    })
+    }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("tailor-form").addEventListener("submit",e=>{
-    e.preventDefault();safeRun(async()=>{
+    e.preventDefault();
+    const form=e.currentTarget,submit=form.querySelector('[type="submit"]');
+    if(submit?.disabled)return;
+    if(submit)submit.disabled=true;
+    safeRun(async()=>{
       if(!canUse())throw Error("Заявка доступна только в Telegram-демо");
-      const form=e.currentTarget,fd=new FormData(form);
+      const fd=new FormData(form);
       state.tailorRequestKey ||= crypto.randomUUID().replace(/-/g,"");
       const result=await api("/api/custom","POST",{...Object.fromEntries(fd),requestKey:state.tailorRequestKey});
       state.tailorRequestKey=null;
       toast("Заявка №"+result.orderId+" зарегистрирована");form.reset();
-    })
+    }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("panel-tabs").addEventListener("click",e=>{const b=e.target.closest("[data-panel]");if(b){state.panel=b.dataset.panel;renderPanel()}});
   $("admin-data").addEventListener("click",e=>{
@@ -333,6 +346,7 @@ async function init(){
   });
   $("editor-form").addEventListener("submit",saveEditor);
   await safeRun(loadCatalog);
+  if(!state.catalog)renderProducts();
   await loadMe();
   await safeRun(loadCart);
 }

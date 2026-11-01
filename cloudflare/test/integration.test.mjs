@@ -525,3 +525,34 @@ test("Telegram checkout preserves cart additions made before its stock transacti
       "buyer must be warned of an interrupted checkout");
   }finally{globalThis.fetch=originalFetch;db.close()}
 });
+
+
+test("forgetme unlinks Telegram identity and clears hidden cart/session/idempotency data",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name,username) VALUES(1,777,'Real Name','username')");
+  db.exec("INSERT INTO orders(id,customer_id,kind,status,contact_name,contact_phone,delivery_address) VALUES(1,1,'catalog','completed','Real Name','@username','Address')");
+  db.exec("INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(777,'old_key_1234567890',1)");
+  db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,1,1)");
+  db.exec("INSERT INTO sessions(telegram_id,flow,step,payload) VALUES(777,'custom','details','{}')");
+  const oldFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  try{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(makeUpdate(121001,{text:"/forgetme"}))
+    });
+    assert.equal((await worker.fetch(req,env,{waitUntil(){}})).status,200);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customers WHERE telegram_id=777").get().n,0,
+      "a completed customer should no longer be linked to Telegram ID after forgetting");
+    assert.equal(db.prepare("SELECT telegram_id FROM customers WHERE id=1").get().telegram_id,-1,
+      "keep internal order link but replace externally identifying Telegram ID");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM checkout_requests WHERE telegram_id=777").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE telegram_id=777").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=1").get().n,0);
+    const order=db.prepare("SELECT contact_name,contact_phone,delivery_address FROM orders WHERE id=1").get();
+    assert.equal(order.contact_name,"");
+    assert.equal(order.contact_phone,"");
+    assert.equal(order.delivery_address,"");
+  }finally{globalThis.fetch=oldFetch;db.close()}
+});

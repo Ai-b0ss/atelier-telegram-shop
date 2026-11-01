@@ -390,12 +390,19 @@ export function makeHandler(env) {
       const c=await customer(u);
       const open=await first(db,"SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status NOT IN ('completed','canceled')",c.id);
       if(open.n>0)return send(id,"У вас есть незавершённые заказы. Свяжитесь с менеджером для удаления.");
+      // Customer identity is their positive Telegram ID. Blank names alone
+      // are not anonymization while orders still link to that ID. Retain the
+      // internal accounting customer row, but pseudonymize its external key
+      // with a unique negative internal ID (legitimate Telegram IDs > 0).
       await db.batch([
         db.prepare("DELETE FROM custom_attachments WHERE order_id IN (SELECT id FROM orders WHERE customer_id=?)").bind(c.id),
         db.prepare("UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?").bind(c.id),
-        db.prepare("UPDATE customers SET full_name='',username='' WHERE id=?").bind(c.id)
+        db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
+        db.prepare("DELETE FROM checkout_requests WHERE telegram_id=?").bind(id),
+        db.prepare("DELETE FROM sessions WHERE telegram_id=?").bind(id),
+        db.prepare("UPDATE customers SET telegram_id=-id,full_name='',username='' WHERE id=?").bind(c.id)
       ]);
-      return send(id,"Контакты и мерки в закрытых заказах обезличены.");
+      return send(id,"Контакты, мерки и связь закрытых заказов с вашим Telegram ID удалены. Учётные записи операций сохраняются без ваших контактных данных.");
     }
     if(cmd.startsWith("/")&&["/admin","/orders","/order","/status","/quote","/payment","/report","/stats"].includes(cmd))
       return admins.has(u.id)?adminCommand(id,u,txt):send(id,"Доступ запрещён.");

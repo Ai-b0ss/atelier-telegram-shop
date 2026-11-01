@@ -94,10 +94,12 @@ export function makeHandler(env) {
     // conditional WHERE stock>=?, it fails the transaction on a sold-out SKU.
     const statements=[
       ...items.map(x=>db.prepare(
-        "UPDATE variants SET stock=CASE WHEN active=1 AND EXISTS("+
+        "UPDATE variants SET stock=CASE WHEN active=1 AND price_cents=? AND cost_cents=? AND EXISTS("+
         "SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1"+
-        ") THEN stock-? ELSE -1 END WHERE id=?"
-      ).bind(x.quantity,x.variant_id)),
+        ") AND EXISTS(SELECT 1 FROM cart_items ci WHERE ci.customer_id=? AND ci.variant_id=variants.id AND ci.quantity=?)"+
+        " AND (SELECT COUNT(*) FROM cart_items WHERE customer_id=?)=?"+
+        " THEN stock-? ELSE -1 END WHERE id=?"
+      ).bind(x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
       ...items.map(x=>db.prepare(
         "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)"
       ).bind(oid,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),

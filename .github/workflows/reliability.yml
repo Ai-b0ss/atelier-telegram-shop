@@ -37,10 +37,11 @@ jobs:
         env:
           RELIABILITY_CASES: ${{ github.event_name == 'schedule' && '120' || '32' }}
           RELIABILITY_STEPS: ${{ github.event_name == 'schedule' && '150' || '100' }}
-          RELIABILITY_SEED: '26011001'
+          # A new deterministic seed per scheduled run, printed for exact replay.
+          RELIABILITY_SEED: ${{ github.event_name == 'schedule' && github.run_number || 26011001 }}
         run: |
           set -euo pipefail
-          echo "State machine: ${RELIABILITY_CASES} independent seeds x ${RELIABILITY_STEPS} operations"
+          echo "State machine: seed=${RELIABILITY_SEED} cases=${RELIABILITY_CASES} steps=${RELIABILITY_STEPS}"
           node --test cloudflare/test/reliability.test.mjs 2>&1 | tee reliability-results.log
       - name: Upload reproducible test evidence
         if: always()

@@ -1,0 +1,77 @@
+name: Reliability gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Daily independent synthetic stress, UTC. GitHub schedules are best effort.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  state-machine:
+    name: Seeded state-machine / mutation detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check syntax and reliability harness
+        run: |
+          node --check cloudflare/src/api.js
+          node --check cloudflare/src/index.js
+          node --check cloudflare/src/auth.js
+          node --check cloudflare/test/reliability.test.mjs
+      - name: Run reproducible state-machine stress and checker self-test
+        shell: bash
+        env:
+          RELIABILITY_CASES: ${{ github.event_name == 'schedule' && '120' || '32' }}
+          RELIABILITY_STEPS: ${{ github.event_name == 'schedule' && '150' || '100' }}
+          RELIABILITY_SEED: '26011001'
+        run: |
+          set -euo pipefail
+          echo "State machine: ${RELIABILITY_CASES} independent seeds x ${RELIABILITY_STEPS} operations"
+          node --test cloudflare/test/reliability.test.mjs 2>&1 | tee reliability-results.log
+      - name: Upload reproducible test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-test-results
+          path: reliability-results.log
+          if-no-files-found: warn
+          retention-days: 21
+
+  regression:
+    name: Full Node regression and fault injection
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run all production handler integration tests
+        run: node --test cloudflare/test/*.test.mjs
+      - name: Verify that accidental production flags are not enabled in deployment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          config=json.loads(Path("cloudflare/wrangler.jsonc").read_text("utf-8"))
+          vars=config.get("vars", {})
+          assert vars.get("DEMO_MODE") == "1", "Demo must remain enabled in versioned deployment config"
+          assert vars.get("STORE_READY") != "1", "Sales must not be enabled by a code merge"
+          print("Versioned Worker configuration is demo-only")
+          PY

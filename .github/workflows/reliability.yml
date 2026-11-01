@@ -1,0 +1,106 @@
+name: Reliability gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Daily independent synthetic stress, UTC. GitHub schedules are best effort.
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  state-machine:
+    name: Seeded state-machine / mutation detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check syntax and reliability harness
+        run: |
+          node --check cloudflare/src/api.js
+          node --check cloudflare/src/index.js
+          node --check cloudflare/src/auth.js
+          node --check cloudflare/test/reliability.test.mjs
+      - name: Run reproducible state-machine stress and checker self-test
+        shell: bash
+        env:
+          RELIABILITY_CASES: '120'
+          RELIABILITY_STEPS: '150'
+          # A new deterministic seed per scheduled run, printed for exact replay.
+          RELIABILITY_SEED: ${{ github.event_name == 'schedule' && github.run_number || 26011001 }}
+        run: |
+          set -euo pipefail
+          echo "State machine: seed=${RELIABILITY_SEED} cases=${RELIABILITY_CASES} steps=${RELIABILITY_STEPS}"
+          node --test cloudflare/test/reliability.test.mjs 2>&1 | tee reliability-results.log
+      - name: Upload reproducible test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-test-results
+          path: reliability-results.log
+          if-no-files-found: warn
+          retention-days: 21
+
+  regression:
+    name: Full Node regression and fault injection
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run all production handler integration tests
+        run: node --test cloudflare/test/*.test.mjs
+      - name: Verify that accidental production flags are not enabled in deployment config
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          config=json.loads(Path("cloudflare/wrangler.jsonc").read_text("utf-8"))
+          vars=config.get("vars", {})
+          assert vars.get("DEMO_MODE") == "1", "Demo must remain enabled in versioned deployment config"
+          assert vars.get("STORE_READY") != "1", "Sales must not be enabled by a code merge"
+          print("Versioned Worker configuration is demo-only")
+          PY
+
+  incident:
+    name: Record scheduled reliability failure
+    needs: [state-machine, regression]
+    if: ${{ always() && github.event_name == 'schedule' && (needs.state-machine.result != 'success' || needs.regression.result != 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Open or update a single tracked GitHub issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATE_RESULT: ${{ needs.state-machine.result }}
+          REGRESSION_RESULT: ${{ needs.regression.result }}
+        run: |
+          set -euo pipefail
+          title="[Reliability] Scheduled check failed"
+          body="Automated offline reliability regression failed. Review ${RUN_URL}. State-machine: ${STATE_RESULT}; regression: ${REGRESSION_RESULT}. Do not deploy until fixed and all checks pass."
+          existing="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "[Reliability] Scheduled check failed") | .number' | head -n 1)"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body"
+          fi

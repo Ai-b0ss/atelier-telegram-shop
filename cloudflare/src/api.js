@@ -14,11 +14,41 @@ const statusTransitions={
   shipped:["completed","canceled"],completed:[],canceled:[]
 };
 const escaped=(e)=>e?.message||"error";
-function safeBody(request){
-  return request.json().then(value=>{
-    if(!value||Array.isArray(value)||typeof value!=="object")throw Error("Invalid JSON body");
-    return value;
-  });
+class RequestBodyError extends Error{
+  constructor(message,status){super(message);this.name="RequestBodyError";this.status=status}
+}
+const MAX_JSON_BODY_BYTES=16*1024;
+async function safeBody(request){
+  // A valid Telegram signature is not permission to exhaust the Worker by
+  // submitting unbounded JSON. Limit actual streamed bytes, not only headers.
+  const length=request.headers.get("content-length");
+  if(length&&/^\d+$/.test(length)&&Number(length)>MAX_JSON_BODY_BYTES)
+    throw new RequestBodyError("Request body too large",413);
+  const reader=request.body?.getReader();
+  if(!reader)throw new RequestBodyError("Invalid JSON body",400);
+  let bytes=0;
+  const buffers=[];
+  try{
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      bytes+=value.byteLength;
+      if(bytes>MAX_JSON_BODY_BYTES){
+        await reader.cancel().catch(()=>{});
+        throw new RequestBodyError("Request body too large",413);
+      }
+      buffers.push(value);
+    }
+  }finally{reader.releaseLock()}
+  const combined=new Uint8Array(bytes);
+  let offset=0;
+  for(const chunk of buffers){combined.set(chunk,offset);offset+=chunk.byteLength}
+  let value;
+  try{value=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(combined))}
+  catch{throw new RequestBodyError("Invalid JSON body",400)}
+  if(!value||Array.isArray(value)||typeof value!=="object")
+    throw new RequestBodyError("Invalid JSON body",400);
+  return value;
 }
 async function getCustomer(db,u){
   await run(db,"INSERT INTO customers(telegram_id,full_name,username) VALUES(?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name,username=excluded.username",
@@ -92,8 +122,11 @@ export async function handleApi(request,env,url){
     const name=text(b.name,120),phone=text(b.phone,120),address=text(b.address,300);
     if(!/^[a-zA-Z0-9_-]{16,64}$/.test(requestKey)||name.length<2||phone.length<3||address.length<3)
       return err("Fill in name, contact and delivery method");
-    const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-    if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
+    const previous=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+    if(previous){
+      if(previous.kind!=="catalog")return err("Request key already used for tailoring",409);
+      return json({ok:true,orderId:previous.order_id,duplicate:true});
+    }
     const c=await getCustomer(env.DB,u);
     const cartLines=await first(env.DB,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
     const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
@@ -134,14 +167,17 @@ export async function handleApi(request,env,url){
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);
       if(!orderId){
-        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        const committed=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
         orderId=committed?.order_id;
       }
     }catch{
       // A failed D1 batch rolls everything back, including the order header
       // and personal information. No compensating DELETE is necessary.
-      const found=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-      if(found)return json({ok:true,orderId:found.order_id,duplicate:true});
+      const found=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+      if(found){
+        if(found.kind!=="catalog")return err("Request key already used for tailoring",409);
+        return json({ok:true,orderId:found.order_id,duplicate:true});
+      }
       return err("Stock or cart changed during checkout. Your cart is preserved.",409);
     }
     if(!orderId)return err("Order committed but confirmation could not be retrieved; contact support.",503);
@@ -159,8 +195,11 @@ export async function handleApi(request,env,url){
     if(!/^[a-zA-Z0-9_-]{16,64}$/.test(requestKey)||description.length<10||
        name.length<2||phone.length<3||measurements.length<3||address.length<3)
       return err("Complete the tailoring request");
-    const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-    if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
+    const previous=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+    if(previous){
+      if(previous.kind!=="custom")return err("Request key already used for catalog checkout",409);
+      return json({ok:true,orderId:previous.order_id,duplicate:true});
+    }
     const c=await getCustomer(env.DB,u);
     let orderId;
     try{
@@ -175,13 +214,16 @@ export async function handleApi(request,env,url){
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);
       if(!orderId){
-        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        const committed=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
         orderId=committed?.order_id;
       }
     }catch{
       // No orphan or personal data remains after a failed D1 transaction.
-      const existing=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-      if(existing)return json({ok:true,orderId:existing.order_id,duplicate:true});
+      const existing=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+      if(existing){
+        if(existing.kind!=="custom")return err("Request key already used for catalog checkout",409);
+        return json({ok:true,orderId:existing.order_id,duplicate:true});
+      }
       return err("Request could not be saved; retry",409);
     }
     if(!orderId)return err("Request saved but confirmation unavailable; contact support.",503);

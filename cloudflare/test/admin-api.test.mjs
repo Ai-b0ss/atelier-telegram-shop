@@ -471,3 +471,30 @@ test("atomic multi-item checkout links both lines and idempotency to one order",
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,2);
   }finally{globalThis.fetch=originalFetch;db.close()}
 });
+
+
+test("idempotency keys cannot silently alias different order kinds",async()=>{
+  const storage=localDB(),raw=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  const key="shared_cross_operation_12345";
+  try{
+    const tailoring={requestKey:key,name:"Synthetic Buyer",phone:"@test",address:"Pickup",
+      description:"A synthetic custom-made coat with embroidery",
+      measurements:"Chest 100"};
+    const custom=await call(env,"/api/custom","POST",tailoring);
+    assert.equal(custom.status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    const checkout=await call(env,"/api/checkout","POST",{
+      requestKey:key,name:"Synthetic Buyer",phone:"@test",address:"Pickup"
+    });
+    assert.equal(checkout.status,409,"catalog checkout must not masquerade as a custom request");
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM orders").get().n,1);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,1);
+    assert.equal(raw.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    const originalCustom=await call(env,"/api/custom","POST",tailoring);
+    assert.equal(originalCustom.status,200);
+    assert.equal((await originalCustom.json()).duplicate,true);
+  }finally{globalThis.fetch=originalFetch;raw.close()}
+});

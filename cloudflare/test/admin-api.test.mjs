@@ -233,6 +233,7 @@ test("cart can discard an archived variant but cannot add it again",async()=>{
     db.exec("UPDATE variants SET active=0 WHERE id=1");
     let cart=await (await call(env,"/api/cart")).json();
     assert.equal(cart.items.length,1,"archived variants remain visible until removed");
+    assert.equal(cart.items[0].available,0,"archived cart line is marked unavailable");
     let removed=await call(env,"/api/cart","POST",{variantId:1,delta:-1});
     assert.equal(removed.status,200,"a user must be able to remove an archived variant");
     assert.equal((await removed.json()).quantity,1);
@@ -263,5 +264,23 @@ test("Mini App rejects partial checkout if any item became inactive",async()=>{
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
     assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
     assert.equal(db.prepare("SELECT stock FROM variants WHERE id=2").get().stock,8);
+  }finally{db.close()}
+});
+
+
+test("cart reflects stock shortage and recovers after reducing quantity",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    db.exec("UPDATE variants SET stock=1 WHERE id=1");
+    let cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items.length,1);
+    assert.equal(cart.items[0].available,0,"stock shortage must be visible before checkout");
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:-1})).status,200);
+    cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items[0].quantity,1);
+    assert.equal(cart.items[0].available,1,"reducing quantity must unblock checkout");
   }finally{db.close()}
 });

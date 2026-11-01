@@ -1,6 +1,6 @@
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
-const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders"};
+const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
 if(app){try{app.ready();app.expand();app.setHeaderColor("#f7f5f1");app.setBackgroundColor("#f7f5f1")}catch{}}
 const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -22,6 +22,7 @@ const canUse=()=>Boolean(state.me?.admin||(!state.me?.demo&&state.me?.user));
 function go(view){
   if(view==="admin"&&!state.me?.admin){toast("Управление доступно только администратору",true);return}
   state.view=view;
+  document.body.classList.toggle("is-inner-view",view!=="catalog");
   document.querySelectorAll(".view").forEach(e=>e.classList.toggle("active",e.id==="view-"+view));
   document.querySelectorAll("[data-view]").forEach(e=>{
     const active=e.dataset.view===view;
@@ -248,7 +249,17 @@ async function init(){
       }
       const variantId=state.selected[Number(add.dataset.add)];
       if(!variantId)return;
-      await api("/api/cart","POST",{variantId,delta:1});toast("Добавлено в корзину");await loadCart();
+      if(state.pendingCart)return;
+      state.pendingCart=true;
+      add.disabled=true;
+      try{
+        await api("/api/cart","POST",{variantId,delta:1});
+        toast("Добавлено в корзину");
+        await loadCart();
+      }finally{
+        state.pendingCart=false;
+        add.disabled=false;
+      }
     });
   });
   $("cart-body").addEventListener("click",e=>{

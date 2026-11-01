@@ -14,11 +14,41 @@ const statusTransitions={
   shipped:["completed","canceled"],completed:[],canceled:[]
 };
 const escaped=(e)=>e?.message||"error";
-function safeBody(request){
-  return request.json().then(value=>{
-    if(!value||Array.isArray(value)||typeof value!=="object")throw Error("Invalid JSON body");
-    return value;
-  });
+class RequestBodyError extends Error{
+  constructor(message,status){super(message);this.name="RequestBodyError";this.status=status}
+}
+const MAX_JSON_BODY_BYTES=16*1024;
+async function safeBody(request){
+  // A valid Telegram signature is not permission to exhaust the Worker by
+  // submitting unbounded JSON. Limit actual streamed bytes, not only headers.
+  const length=request.headers.get("content-length");
+  if(length&&/^\\d+$/.test(length)&&Number(length)>MAX_JSON_BODY_BYTES)
+    throw new RequestBodyError("Request body too large",413);
+  const reader=request.body?.getReader();
+  if(!reader)throw new RequestBodyError("Invalid JSON body",400);
+  let bytes=0;
+  const buffers=[];
+  try{
+    while(true){
+      const {done,value}=await reader.read();
+      if(done)break;
+      bytes+=value.byteLength;
+      if(bytes>MAX_JSON_BODY_BYTES){
+        await reader.cancel().catch(()=>{});
+        throw new RequestBodyError("Request body too large",413);
+      }
+      buffers.push(value);
+    }
+  }finally{reader.releaseLock()}
+  const combined=new Uint8Array(bytes);
+  let offset=0;
+  for(const chunk of buffers){combined.set(chunk,offset);offset+=chunk.byteLength}
+  let value;
+  try{value=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(combined))}
+  catch{throw new RequestBodyError("Invalid JSON body",400)}
+  if(!value||Array.isArray(value)||typeof value!=="object")
+    throw new RequestBodyError("Invalid JSON body",400);
+  return value;
 }
 async function getCustomer(db,u){
   await run(db,"INSERT INTO customers(telegram_id,full_name,username) VALUES(?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name,username=excluded.username",

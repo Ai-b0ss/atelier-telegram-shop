@@ -18,7 +18,7 @@ function makeInitData(id=777,date=Math.floor(Date.now()/1000)){
 }
 function localDB(){
   const db=new DatabaseSync(":memory:");
-  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql"]){
+  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql","migrations/0009_uploaded_photos.sql"]){
     db.exec(readFileSync(new URL("../"+file,import.meta.url),"utf8"));
   }
   return {
@@ -43,7 +43,7 @@ async function call(env,path,method="GET",body=null,auth=makeInitData()){
 }
 test("Telegram Mini App signed initData validates auth_date, signature and admin",async()=>{
   assert.deepEqual((await verifyTelegramInitData(makeInitData(),TOKEN))?.id,777);
-  assert.equal(await verifyTelegramInitData(makeInitData(777,Math.floor(Date.now()/1000)-900),TOKEN),null);
+  assert.equal(await verifyTelegramInitData(makeInitData(777,Math.floor(Date.now()/1000)-90000),TOKEN),null);
   assert.equal(await verifyTelegramInitData(makeInitData().replace("tester","hacker"),TOKEN),null);
   assert.equal(await verifyTelegramInitData(makeInitData(),TOKEN+"x"),null);
   assert.equal(await verifyTelegramInitData("",TOKEN),null);
@@ -498,4 +498,92 @@ test("idempotency keys cannot silently alias different order kinds",async()=>{
     assert.equal(originalCustom.status,200);
     assert.equal((await originalCustom.json()).duplicate,true);
   }finally{globalThis.fetch=originalFetch;raw.close()}
+});
+
+test("customers review a product once, abuse can be hidden and anyone can read",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"100",DEMO_MODE:"0",STORE_READY:"1"};
+  const original=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true});
+  try{
+    const product=DB.raw.prepare("SELECT id FROM products WHERE active=1 LIMIT 1").get().id;
+    const buyer=makeInitData(200);
+    const post=(body,auth=buyer)=>call(env,"/api/reviews","POST",body,auth);
+    assert.equal((await post({productId:product,rating:6,text:"Отлично сидит"})).status,400);
+    assert.equal((await post({productId:product,rating:5,text:"  "})).status,400);
+    assert.equal((await post({productId:999999,rating:5,text:"Отлично сидит"})).status,404);
+    assert.equal((await post({productId:product,rating:5,text:"<b>Отлично</b> сидит"})).status,200);
+    assert.equal((await post({productId:product,rating:3,text:"Подумал ещё раз"})).status,200);
+    const read=async()=>{
+      const request=new Request(workerUrl+"/api/reviews?product="+product);
+      return (await (await handleApi(request,env,new URL(request.url))).json()).reviews;
+    };
+    const [review,...others]=await read();
+    assert.equal(others.length,0,"a repeat review replaces the first");
+    assert.equal(review.rating,3);
+    assert.equal(review.telegram_id,undefined);
+    const catalogRequest=new Request(workerUrl+"/api/catalog");
+    const catalog=await (await handleApi(catalogRequest,env,new URL(catalogRequest.url))).json();
+    assert.equal(catalog.products.find(p=>p.id===product).reviews,1);
+    assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},buyer)).status,403);
+    assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},makeInitData(100))).status,200);
+    assert.equal((await read()).length,0);
+    assert.equal((await post({productId:product,rating:5,text:"Снова тот же текст"})).status,200);
+    assert.equal((await read()).length,0,"a hidden review stays hidden when resubmitted");
+  }finally{globalThis.fetch=original}
+});
+
+test("sign-in accepts current Telegram clients that sign the signature field too",async()=>{
+  const now=Math.floor(Date.now()/1000);
+  const fields={auth_date:String(now-3600),query_id:"AAH",signature:"abc_DEF-123",user:JSON.stringify({id:555,first_name:"Игорь",username:"buyer"})};
+  const check=Object.entries(fields).sort(([a],[b])=>a.localeCompare(b,"en")).map(([k,v])=>k+"="+v).join("\n");
+  const key=createHmac("sha256","WebAppData").update(TOKEN).digest();
+  const hash=createHmac("sha256",key).update(check).digest("hex");
+  const initData=new URLSearchParams({...fields,hash}).toString();
+  const user=await verifyTelegramInitData(initData,TOKEN);
+  assert.equal(user?.id,555);
+  assert.equal(await verifyTelegramInitData(initData,"another-bot-token"),null);
+  assert.equal(await verifyTelegramInitData(initData.replace("abc_DEF","xyz_DEF"),TOKEN),null,"tampering is refused");
+  assert.equal(await verifyTelegramInitData(initData,TOKEN,now+90000),null,"a day-old session expires");
+});
+
+test("administrators create a full item in one form and manage its photos",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"100",DEMO_MODE:"0",STORE_READY:"1"};
+  const admin=makeInitData(100);
+  const created=await (await call(env,"/api/admin/product","POST",{name:"Куртка",description:"Лён",newCategory:"Куртки",sizes:"S, M, S",color:"чёрный",priceCents:900000,costCents:0,stock:2},admin)).json();
+  assert.equal(created.ok,true);
+  const sizes=DB.raw.prepare("SELECT size,stock,price_cents FROM variants WHERE product_id=? ORDER BY id").all(created.id).map(x=>[x.size,x.stock,x.price_cents]);
+  assert.deepEqual(sizes,[["S",2,900000],["M",2,900000]]);
+  DB.raw.prepare("UPDATE products SET images=?,photo_ids=?,photo_file_id=? WHERE id=?").run('["/products/a/front.webp"]','["file-one","file-two"]',"file-one",created.id);
+  const list=async()=>{
+    const request=new Request(workerUrl+"/api/catalog");
+    const body=await (await handleApi(request,env,new URL(request.url))).json();
+    return body.products.find(p=>p.id===created.id);
+  };
+  const before=await list();
+  assert.equal(before.images.length,3);
+  assert.equal(before.photo_ids,undefined,"Telegram file IDs stay private");
+  assert.match(before.images[1],/^\/media\/product\/\d+\/0\?v=/);
+  assert.equal((await call(env,"/api/admin/product/photo-remove","POST",{id:created.id,index:1},makeInitData(200))).status,403);
+  assert.equal((await call(env,"/api/admin/product/photo-remove","POST",{id:created.id,index:1},admin)).status,200);
+  assert.equal(DB.raw.prepare("SELECT photo_file_id FROM products WHERE id=?").get(created.id).photo_file_id,"file-two");
+  assert.equal((await list()).images.length,2);
+  assert.equal((await call(env,"/api/admin/product","POST",{id:created.id,name:"Куртка",categoryId:(await list()).category_id,active:false},admin)).status,200);
+  assert.equal(await list(),undefined,"a hidden item leaves the catalogue");
+});
+
+test("customers see only their own orders with status history",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"100",DEMO_MODE:"0",STORE_READY:"1",MANAGER_USERNAME:"seller_01"};
+  await call(env,"/api/orders","GET",null,makeInitData(201));
+  await call(env,"/api/orders","GET",null,makeInitData(202));
+  const owner=DB.raw.prepare("SELECT id FROM customers WHERE telegram_id=201").get().id;
+  const order=DB.raw.prepare("INSERT INTO orders(customer_id,kind,status,total_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','confirmed',500000,'А','@a','м')").run(owner).lastInsertRowid;
+  DB.raw.prepare("INSERT INTO status_history(order_id,new_status) VALUES(?,'new'),(?,'confirmed')").run(order,order);
+  const mine=await (await call(env,"/api/orders","GET",null,makeInitData(201))).json();
+  assert.equal(mine.orders.length,1);
+  assert.deepEqual(mine.orders[0].statuses.slice(-2),["new","confirmed"]);
+  assert.match(mine.orders[0].managerUrl,/seller_01/);
+  assert.equal((await (await call(env,"/api/orders","GET",null,makeInitData(202))).json()).orders.length,0);
 });

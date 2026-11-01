@@ -29,3 +29,6 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
   ON notification_outbox(next_attempt_at) WHERE delivered_at IS NULL AND failed_at IS NULL;
+CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id), customer_id INTEGER NOT NULL REFERENCES customers(id), author_name TEXT NOT NULL DEFAULT '', rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5), body TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(product_id,customer_id));
+CREATE INDEX IF NOT EXISTS idx_reviews_product ON reviews(product_id,hidden,updated_at);
+CREATE TABLE IF NOT EXISTS photo_cache (path TEXT PRIMARY KEY, file_id TEXT NOT NULL);

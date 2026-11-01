@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import worker from '../src/index.js';
+import worker,{makeHandler} from '../src/index.js';
 
 function database(){
   const db=new DatabaseSync(':memory:');
@@ -12,6 +12,8 @@ function database(){
   db.exec(readFileSync(new URL('../migrations/0002_miniapp.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../migrations/0003_store_readiness.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../migrations/0004_shipped_return.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0006_product_gallery.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0009_uploaded_photos.sql',import.meta.url),'utf8'));
   return {
     raw: db,
     prepare(sql){
@@ -555,4 +557,22 @@ test("forgetme unlinks Telegram identity and clears hidden cart/session/idempote
     assert.equal(order.contact_phone,"");
     assert.equal(order.delivery_address,"");
   }finally{globalThis.fetch=oldFetch;db.close()}
+});
+
+test('the schedule uploads a new bot avatar once and retries after a refusal',async()=>{
+  const db=new DatabaseSync(':memory:');
+  db.exec("CREATE TABLE photo_cache (path TEXT PRIMARY KEY, file_id TEXT NOT NULL);CREATE TABLE notification_outbox(id INTEGER PRIMARY KEY,order_id INTEGER,event_type TEXT,recipient_id INTEGER,attempts INTEGER DEFAULT 0,next_attempt_at TEXT,lease_until TEXT,delivered_at TEXT,failed_at TEXT);");
+  const prep=sql=>{const s=db.prepare(sql);let v=[];return {bind(...x){v=x;return this},async first(){return s.get(...v)||null},async all(){return {results:s.all(...v)}},async run(){const r=s.run(...v);return {meta:{changes:Number(r.changes)}}}}};
+  const DB={prepare:prep,async batch(){return []}};
+  const env={DB,BOT_TOKEN:'t',ASSETS:{fetch:async()=>new Response('jpg')}};
+  const handler=makeHandler(env),prior=globalThis.fetch;
+  let calls=0,accept=false;
+  globalThis.fetch=async()=>{calls++;return accept?Response.json({ok:true,result:true}):Response.json({ok:false,description:'no'},{status:400})};
+  try{
+    await assert.rejects(handler.syncAvatar());
+    accept=true;
+    await handler.syncAvatar();
+    await handler.syncAvatar();
+    assert.equal(calls,2,'a successful upload is not repeated');
+  }finally{globalThis.fetch=prior;db.close()}
 });

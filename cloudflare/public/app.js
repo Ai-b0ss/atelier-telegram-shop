@@ -1,8 +1,9 @@
 import {productCountLabel, syncTelegramBackButton, configureTelegramBackNavigation} from "./ui-helpers.js";
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
-const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
-if(app){try{app.ready();app.expand();app.setHeaderColor("#f3f0e9");app.setBackgroundColor("#f3f0e9")}catch{}}
+const state={reviews:{},reviewDraft:{rating:0,text:""},catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
+// Photo swipes and sheet scrolling must not minimise the app.
+if(app){try{app.ready();app.expand();app.disableVerticalSwipes?.();app.setHeaderColor("#f3f0e9");app.setBackgroundColor("#f3f0e9")}catch{}}
 const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=amount=>new Intl.NumberFormat("ru-RU",{style:"currency",currency:"RUB",minimumFractionDigits:0,maximumFractionDigits:2}).format((Number(amount)||0)/100);
@@ -32,7 +33,7 @@ function applyMode(){
   $("checkout-submit").textContent=demo?"Создать тестовый заказ":"Оформить заказ";
 }
 const photoHtml=(p,alt=true)=>p.photo_available?
-  '<img class="product-image" '+(alt?'alt="'+esc(p.name)+'"':'alt=""')+' decoding="async" loading="lazy" src="/media/product/'+Number(p.product_id??p.id)+'" data-photo>':
+  '<img class="product-image" '+(alt?'alt="'+esc(p.name)+'"':'alt=""')+' decoding="async" loading="lazy" src="'+esc(p.images?.[0]||"/media/product/"+Number(p.product_id??p.id))+'" data-photo>':
   '<span class="photo-empty"><b>'+esc(String(p.name||"A").slice(0,1))+'</b><small>Фото скоро</small></span>';
 function setCartCount(n){
   const badge=$("cart-count");
@@ -54,17 +55,130 @@ function go(view){
     e.setAttribute("aria-pressed",String(active));
   });
   if(view==="cart")safeRun(loadCart);
+  if(view==="reviews")safeRun(loadAllReviews);
+  if(view==="orders")safeRun(loadOrders);
+  syncMainButton();
   if(view==="admin"&&state.me?.admin)safeRun(loadAdmin);
-  window.scrollTo({top:0,behavior:"smooth"});
+  window.scrollTo(0,0);
+}
+// Telegram's own bottom button is always reachable, even above the keyboard.
+const nativeCheckout=()=>Boolean(initData&&app?.MainButton&&app.isVersionAtLeast?.("6.1"));
+function syncMainButton(){
+  if(!nativeCheckout())return;
+  const form=$("checkout-form");
+  const ready=state.view==="cart"&&!form.hidden&&state.cart?.items?.length;
+  try{
+    if(ready){
+      app.MainButton.setText("Оформить заказ · "+money(state.cart.total_cents));
+      app.MainButton.show();
+    }else app.MainButton.hide();
+  }catch{}
+}
+const stepNames={new:"Принят",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов к выдаче",shipped:"Передан",completed:"Получен"};
+function orderSteps(order){
+  const seen=new Set(order.statuses||[]);
+  const steps=["new","confirmed","in_production","ready","shipped","completed"].filter(x=>{
+    if(x==="in_production")return order.kind==="custom"||seen.has(x)||order.status===x;
+    if(x==="shipped")return seen.has(x)||order.status===x;
+    return true;
+  });
+  const at=steps.indexOf(order.status);
+  return '<ol class="order-steps">'+steps.map((x,i)=>'<li class="'+(i<at?"was":i===at?"now":"")+'">'+esc(stepNames[x])+'</li>').join("")+'</ol>';
+}
+async function loadOrders(){
+  if(!canUse()){$("orders-list").innerHTML='<p class="review-note">Заказы доступны в Telegram.</p>';return}
+  const {orders}=await api("/api/orders");
+  $("orders-list").innerHTML=orders.length?orders.map(o=>'<article class="order-card"><div class="order-top"><b>Заказ №'+Number(o.id)+'</b><span>'+esc(reviewDate(o.created_at))+'</span></div>'+
+    (o.kind==="custom"?'<p>Пошив: '+esc(String(o.custom_details||"").slice(0,120))+'</p>':o.items.map(x=>'<p>'+esc(x.name)+', '+esc(x.size)+' × '+Number(x.quantity)+'</p>').join(""))+
+    (Number(o.total_cents)?'<p class="order-sum">'+money(o.total_cents)+'</p>':'<p class="order-sum">Цена согласуется</p>')+
+    (o.status==="canceled"?'<p class="order-canceled">Заказ отменён</p>':orderSteps(o))+
+    (o.managerUrl&&o.status!=="canceled"&&o.status!=="completed"?'<a class="quiet" href="'+esc(o.managerUrl)+'" data-manager-link>Написать менеджеру</a>':'')+
+    '</article>').join(""):'<p class="review-note">Заказов пока нет.</p>';
 }
 const categoryName=id=>state.catalog?.categories?.find(c=>c.id===id)?.name||"Коллекция";
-async function loadCatalog(){
-  state.catalog=await api("/api/catalog");
+const CATALOG_KEY="atelier-catalog";
+function showCatalog(){
   applyMode();
   $("product-count").textContent=productCountLabel(state.catalog.products.length);
-  const categories=[{id:0,name:"Всё"},...state.catalog.categories];
+  const stocked=new Set(state.catalog.products.map(p=>p.category_id));
+  const categories=[{id:0,name:"Всё"},...state.catalog.categories.filter(c=>stocked.has(c.id))];
   $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
   renderProducts();
+  renderHero();
+}
+async function loadCatalog(){
+  state.catalog=await api("/api/catalog");
+  try{localStorage.setItem(CATALOG_KEY,JSON.stringify(state.catalog))}catch{}
+  showCatalog();
+}
+// The last catalogue appears at once on reopen; orders are still checked by the server.
+function restoreCatalog(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(CATALOG_KEY)||"null");
+    if(saved?.products&&saved?.categories&&saved?.variants){state.catalog=saved;showCatalog()}
+  }catch{}
+}
+const heroState={slides:[],at:0,timer:0};
+const SLIDE_MS=5000;
+function showSlide(at){
+  heroState.at=at;
+  $("hero-media").querySelectorAll(".hero-slide").forEach((el,i)=>el.classList.toggle("on",i===at));
+  $("hero-bars").querySelectorAll("i").forEach((el,i)=>{el.classList.toggle("seen",i<at);el.classList.toggle("on",i===at)});
+  clearTimeout(heroState.timer);
+  if(heroState.slides.length>1&&!matchMedia("(prefers-reduced-motion:reduce)").matches)
+    heroState.timer=setTimeout(()=>showSlide((at+1)%heroState.slides.length),SLIDE_MS);
+}
+const heroSlide=x=>'<button type="button" class="hero-slide" data-open="'+x.id+'" aria-label="'+esc(x.name)+'"><img alt="" src="'+esc(x.src)+'"></button>';
+function renderHero(){
+  if(heroState.slides.length)return; // Refreshing the catalogue must not restart the slideshow.
+  const shots=(state.catalog?.products||[]).flatMap(p=>p.images?.length?[{id:p.id,name:p.name,src:p.images[0]}]:[]);
+  if(!shots.length)return;
+  // The first photo appears at once so the page does not jump when it loads.
+  heroState.slides=[shots[0]];
+  $("hero").classList.add("has-media");
+  $("hero-media").innerHTML=heroSlide(shots[0]);
+  showSlide(0);
+  // Low-resolution shots would look soft at full width, so later slides must be sharp.
+  shots.slice(1).forEach(shot=>{
+    const probe=new Image();
+    probe.onload=()=>{
+      if(probe.naturalWidth<600)return;
+      heroState.slides.push(shot);
+      $("hero-media").insertAdjacentHTML("beforeend",heroSlide(shot));
+      $("hero-bars").innerHTML=heroState.slides.map(()=>'<i></i>').join("");
+      showSlide(heroState.at);
+    };
+    probe.src=shot.src;
+  });
+}
+const stars=n=>"★".repeat(n)+"☆".repeat(5-n);
+const reviewDate=value=>{const d=new Date(String(value).replace(" ","T")+"Z");return isNaN(d)?"":d.toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"})};
+function reviewsHtml(p){
+  const list=state.reviews[p.id];
+  const items=!list?'<p class="review-note">Загружаем отзывы…</p>':list.length?list.map(r=>'<article class="review"><div class="review-top"><b>'+esc(r.author_name)+'</b><span class="review-stars" aria-label="Оценка '+Number(r.rating)+' из 5">'+stars(Number(r.rating))+'</span></div><p>'+esc(r.body)+'</p><small>'+esc(reviewDate(r.updated_at))+'</small>'+(state.me?.admin?'<button type="button" class="quiet" data-hide-review="'+Number(r.id)+'" data-product="'+p.id+'">Скрыть</button>':'')+'</article>').join(""):'<p class="review-note">Отзывов пока нет. Ваш может быть первым.</p>';
+  const form=canUse()?reviewForm(p.id):'<p class="review-note">Оставить отзыв можно в Telegram.</p>';
+  return '<section class="reviews"><h4>Отзывы'+(p.reviews?' <span>'+esc(String(p.rating).replace(".",","))+' ★ · '+Number(p.reviews)+'</span>':'')+'</h4>'+items+form+'</section>';
+}
+function reviewForm(product,picker=""){
+  const draft=state.reviewDraft;
+  return '<form class="review-form"'+(product?' data-product="'+product+'"':'')+'>'+picker+'<div class="star-pick" role="radiogroup" aria-label="Оценка">'+[1,2,3,4,5].map(n=>'<button type="button" role="radio" aria-checked="'+(draft.rating===n)+'" aria-label="'+n+' из 5" data-star="'+n+'" class="'+(draft.rating>=n?"on":"")+'">★</button>').join("")+'</div><textarea name="text" maxlength="1000" rows="3" placeholder="Как сидит, что понравилось…">'+esc(draft.text)+'</textarea><button type="submit" class="primary">Оставить отзыв</button></form>';
+}
+async function loadAllReviews(){
+  const result=await api("/api/reviews");
+  $("reviews-count").textContent=result.reviews.length?String(result.reviews.length):"";
+  const products=state.catalog?.products||[];
+  const picker='<label class="review-pick">Какую вещь оцениваете<select name="product">'+products.map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join("")+'</select></label>';
+  $("reviews-page").innerHTML=
+    (result.reviews.length?result.reviews.map(r=>'<article class="review"><div class="review-top"><b>'+esc(r.author_name)+'</b><span class="review-stars" aria-label="Оценка '+Number(r.rating)+' из 5">'+stars(Number(r.rating))+'</span></div><button type="button" class="review-product" data-open="'+Number(r.product_id)+'">'+esc(r.product_name)+'</button><p>'+esc(r.body)+'</p><small>'+esc(reviewDate(r.updated_at))+'</small>'+(state.me?.admin?'<button type="button" class="quiet" data-hide-review="'+Number(r.id)+'" data-product="'+Number(r.product_id)+'">Скрыть</button>':'')+'</article>').join(""):'<p class="review-note">Отзывов пока нет. Ваш может быть первым.</p>')+
+    (canUse()&&products.length?'<h4 class="review-new">Оставить отзыв</h4>'+reviewForm(0,picker):canUse()?'':'<p class="review-note">Оставить отзыв можно в Telegram.</p>');
+}
+async function loadReviews(productId){
+  const result=await api("/api/reviews?product="+productId);
+  state.reviews[productId]=result.reviews;
+  const sheet=$("product-sheet");
+  const holder=$("sheet-content").querySelector(".reviews");
+  const product=state.catalog?.products.find(x=>x.id===productId);
+  if(sheet.open&&holder&&product&&state.openProduct===productId)holder.outerHTML=reviewsHtml(product);
 }
 function renderProducts(){
   if(!state.catalog){
@@ -80,26 +194,47 @@ function renderProducts(){
     const label=!variants.length?"Нет в наличии":(Math.max(...prices)>low?"от ":"")+money(low);
     return '<button type="button" class="product-card'+(variants.length?"":" is-sold")+'" style="--i:'+idx+'" data-open="'+p.id+'">'+
       '<span class="product-photo">'+photoHtml(p)+'</span>'+
-      '<span class="product-meta"><b>'+esc(p.name)+'</b><span>'+esc(label)+'</span></span></button>';
+      '<span class="product-meta"><b>'+esc(p.name)+'</b><span>'+esc(label)+(p.reviews?' · ★ '+esc(String(p.rating).replace(".",",")):'')+'</span></span></button>';
   }).join(""):'<div class="card padded empty">В этой категории пока ничего нет.</div>';
+}
+function galleryHtml(p){
+  if(!(p.images?.length>1))return '<div class="sheet-photo">'+photoHtml(p)+'</div>';
+  return '<div class="sheet-photo gallery"><div class="gallery-track" tabindex="0" aria-label="Фотографии товара">'+
+    p.images.map((src,i)=>'<div class="gallery-slide"><img class="product-image" alt="'+esc(p.name)+', фото '+(i+1)+'" decoding="async" '+(i?'loading="lazy" ':'')+'src="'+esc(src)+'" data-photo></div>').join("")+
+    '</div><div class="gallery-dots" aria-hidden="true">'+p.images.map((_,i)=>'<i class="'+(i?"":"on")+'"></i>').join("")+'</div></div>';
 }
 function openSheet(productId){
   const p=state.catalog?.products.find(x=>x.id===productId);if(!p)return;
+  if(state.openProduct!==productId)state.reviewDraft={rating:0,text:""};
+  state.openProduct=productId;
   const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
   const remembered=state.selected[p.id];
   const choice=variants.find(v=>v.id===remembered)||variants[0];
   if(choice)state.selected[p.id]=choice.id;
   const action=!variants.length?"Нет в наличии":canUse()?"Добавить в корзину":"Открыть в Telegram";
+  // Choosing a size re-renders the sheet: keep the photo and open chart where they were.
+  const swiped=$("sheet-content").querySelector(".gallery-track")?.scrollLeft||0;
+  const chartOpen=Boolean($("sheet-content").querySelector(".size-chart")?.open);
   $("sheet-content").innerHTML='<button type="button" class="sheet-close" data-sheet-close aria-label="Закрыть">×</button>'+
-    '<div class="sheet-photo">'+photoHtml(p)+'</div><div class="sheet-body"><h3 id="sheet-title">'+esc(p.name)+'</h3>'+
+    galleryHtml(p)+'<div class="sheet-body"><h3 id="sheet-title">'+esc(p.name)+'</h3>'+
     '<div class="sheet-price">'+(choice?money(choice.price_cents):"Нет в наличии")+'</div>'+
     (p.description?'<p>'+esc(p.description)+'</p>':'')+
     (variants.length?'<span class="sheet-label">Размер и цвет</span><div class="variants">'+variants.map(v=>'<button type="button" class="variant-pill '+(choice.id===v.id?"selected":"")+'" aria-pressed="'+(choice.id===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'">'+esc(v.size)+'<small>'+esc(v.color)+'</small></button>').join("")+'</div>':'')+
+    (p.size_chart?'<details class="size-chart"'+(chartOpen?" open":"")+'><summary>Таблица размеров</summary><img alt="Таблица размеров: талия, бёдра, посадка и длина в сантиметрах" decoding="async" src="'+esc(p.size_chart)+'"></details>':'')+
     '<div class="stock-hint">'+(choice&&choice.stock<=3?(choice.stock===1?"Последняя вещь":"Осталось: "+choice.stock):"")+'</div>'+
-    '<button type="button" class="primary" data-add="'+p.id+'" '+(variants.length?"":"disabled")+'>'+action+'</button></div>';
+    '<button type="button" class="primary" data-add="'+p.id+'" '+(variants.length?"":"disabled")+'>'+action+'</button>'+reviewsHtml(p)+'</div>';
+  if(!state.reviews[productId])safeRun(()=>loadReviews(productId));
   const sheet=$("product-sheet");
   sheet.classList.remove("closing");
   if(!sheet.open)sheet.showModal();
+  const track=$("sheet-content").querySelector(".gallery-track");
+  if(track){
+    track.scrollLeft=swiped;
+    track.addEventListener("scroll",()=>{
+      const at=Math.round(track.scrollLeft/Math.max(track.clientWidth,1));
+      $("sheet-content").querySelectorAll(".gallery-dots i").forEach((dot,i)=>dot.classList.toggle("on",i===at));
+    },{passive:true});
+  }
 }
 function closeSheet(){
   const sheet=$("product-sheet");
@@ -112,6 +247,7 @@ function showDone({title,text,url}){
   $("done-body").innerHTML='<svg class="done-mark" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="30"/><path d="M24 37l8 8 16-18"/></svg>'+
     '<h2>'+esc(title)+'</h2><p>'+esc(text)+'</p>'+
     (url?'<a class="primary" href="'+esc(url)+'" data-manager-link>Написать менеджеру</a>':'')+
+    '<button type="button" class="quiet" data-view-link="orders">Мои заказы</button>'+
     '<button type="button" class="quiet" data-view-link="catalog">Вернуться в каталог</button>';
   haptic("success");
   go("done");
@@ -129,9 +265,16 @@ async function loadMe(){
     $("admin-gate").textContent="Откройте магазин из Telegram, чтобы войти в защищённую панель.";
     return;
   }
-  const result=await safeRun(()=>api("/api/me"));
-  if(!result){renderProducts();return;}
+  const result=await api("/api/me").catch(()=>null);
+  if(!result){
+    toast("Не удалось войти. Закройте витрину и откройте её заново",true);
+    renderProducts();
+    return;
+  }
   state.me=result;
+  // Spare customers from retyping the contact Telegram already knows.
+  if(result.user?.username)document.querySelectorAll('input[name="phone"]').forEach(input=>{if(!input.value)input.value="@"+result.user.username});
+  if(result.user?.name)document.querySelectorAll('#checkout-form input[name="name"],#tailor-form input[name="name"]').forEach(input=>{if(!input.value)input.value=result.user.name});
   if(result.admin){
     $("admin-nav").hidden=false;
     $("admin-gate").hidden=true;
@@ -143,13 +286,13 @@ async function loadMe(){
 async function loadCart(){
   if(!canUse()){
     $("cart-body").innerHTML='<div class="empty">'+(isDemo()?"Магазин пока работает в тестовом режиме, заказы скоро откроются.":"Откройте магазин через Telegram, чтобы оформить заказ.")+'</div>';
-    $("checkout-form").hidden=true;return;
+    $("checkout-form").hidden=true;syncMainButton();return;
   }
   state.cart=await api("/api/cart");
   setCartCount(state.cart.items.reduce((n,x)=>n+x.quantity,0));
   if(!state.cart.items.length){
     $("cart-body").innerHTML='<div class="empty">Пока пусто. Выберите изделие в каталоге.</div>';
-    $("checkout-form").hidden=true;return;
+    $("checkout-form").hidden=true;syncMainButton();return;
   }
   const hasUnavailable=state.cart.items.some(x=>Number(x.available)===0);
   $("cart-body").innerHTML=(hasUnavailable?'<div class="notice" role="alert">Некоторые изделия недоступны или их осталось меньше, чем в корзине. Уменьшите количество или удалите эти позиции перед оформлением.</div>':"")+
@@ -160,6 +303,7 @@ async function loadCart(){
     '<button data-qty="'+x.variant_id+'" data-delta="1" aria-label="Добавить">+</button></div></div>').join("")+
     '<div class="cart-total"><span>Итого</span><span>'+money(state.cart.total_cents)+'</span></div>';
   $("checkout-form").hidden=hasUnavailable;
+  syncMainButton();
 }
 async function loadAdmin(){
   state.dashboard=await api("/api/admin/dashboard");
@@ -180,16 +324,18 @@ function renderPanel(){
   const d=state.dashboard;if(!d)return;
   if(state.panel==="orders")$("panel-orders").innerHTML='<div class="table-top"><h3>Последние заказы</h3><span class="muted">'+(isDemo()?"Тестовые операции":"")+'</span></div>'+
     '<div class="table-card"><table><thead><tr><th>Заказ</th><th>Вид</th><th>Статус</th><th>Сумма</th><th></th></tr></thead><tbody>'+d.orders.map(orderRow).join("")+'</tbody></table></div>';
-  if(state.panel==="catalog")$("panel-catalog").innerHTML='<div class="table-top"><h3>Ассортимент</h3><button class="quiet" data-create-product="1">+ Добавить изделие</button></div>'+
-    '<div class="table-card"><table><thead><tr><th>Название</th><th>Категория</th><th>Статус</th><th>Варианты</th><th></th></tr></thead><tbody>'+
+  if(state.panel==="catalog")$("panel-catalog").innerHTML='<div class="table-top"><h3>Ассортимент</h3><button class="quiet" data-create-product="1">+ Добавить вещь</button></div>'+
     d.products.map(p=>{
       const vs=d.variants.filter(x=>x.product_id===p.id);
-      return '<tr><td><strong>'+esc(p.name)+'</strong><small>'+esc(p.description.slice(0,80))+'</small></td><td>'+esc(p.category_name)+'</td><td>'+esc(p.active?"Активен":"Скрыт")+'</td><td>'+vs.map(v=>'<button class="link-action" data-variant="'+v.id+'">'+esc(v.size)+' / '+v.stock+' шт.</button>').join(" ")+'<button class="link-action" data-new-variant="'+p.id+'">+ Вариант</button></td><td><button class="link-action" data-product-edit="'+p.id+'">Изменить</button><button class="link-action" data-photo-product="'+p.id+'">Фото ↗</button></td></tr>'
-    }).join("")+'</tbody></table></div>';
+      return '<article class="stock-card'+(p.active?"":" is-hidden")+'"><div class="stock-head">'+(p.images?.[0]?'<img alt="" loading="lazy" src="'+esc(p.images[0])+'">':'<span class="stock-nophoto">Нет фото</span>')+
+        '<div><b>'+esc(p.name)+'</b><small>'+esc(p.category_name)+' · '+(p.active?"в каталоге":"скрыта")+'</small></div></div>'+
+        '<div class="stock-sizes">'+vs.map(v=>'<button class="size-chip'+(v.stock>0&&v.active?"":" is-out")+'" data-variant="'+v.id+'">'+esc(v.size)+' · '+v.stock+' шт. · '+money(v.price_cents)+'</button>').join("")+'<button class="size-chip" data-new-variant="'+p.id+'">+ Размер</button></div>'+
+        '<div class="stock-actions"><button class="link-action" data-product-edit="'+p.id+'">Изменить</button><button class="link-action" data-photo-product="'+p.id+'">Добавить фото ↗</button><button class="link-action" data-toggle-product="'+p.id+'">'+(p.active?"Скрыть":"Показать")+'</button></div></article>';
+    }).join("");
   if(state.panel==="settings"){
     const p=d.settings||{};
     $("panel-settings").innerHTML='<div class="analytics-grid"><form id="settings-form" class="card form-card"><h3>Данные продавца</h3>'+
-      '<p class="muted">Заполните достоверные реквизиты и условия до запуска продаж. Пустые поля допустимы в демо.</p>'+
+      '<p class="muted">Эти сведения видит покупатель. Заполните их перед настоящими продажами.</p>'+
       '<label>Наименование продавца<input name="legalName" maxlength="200" value="'+esc(p.legal_name||"")+'"></label>'+
       '<label>ИНН / регистрационный номер<input name="taxId" maxlength="80" value="'+esc(p.tax_id||"")+'"></label>'+
       '<label>Контакт для покупателей<input name="supportContact" maxlength="180" value="'+esc(p.support_contact||"")+'"></label>'+
@@ -205,7 +351,7 @@ function renderPanel(){
       '<div class="cart-row"><span>Реальные данные продавца</span><strong class="'+(p.legal_name&&p.tax_id?"success":"error")+'">'+(p.legal_name&&p.tax_id?"Заполнены":"Не заполнены")+'</strong></div>'+
       '<div class="cart-row"><span>Доставка и возвраты</span><strong class="'+(p.delivery_policy&&p.return_policy?"success":"error")+'">'+(p.delivery_policy&&p.return_policy?"Заполнены":"Не заполнены")+'</strong></div>'+
       '<div class="cart-row"><span>Политика обработки данных</span><strong class="'+(p.privacy_policy_url?"success":"error")+'">'+(p.privacy_policy_url?"Ссылка указана":"Не указана")+'</strong></div>'+
-      '<p class="small">Для открытия реальных заказов дополнительно требуется успешная приёмка, подтверждённый продавец и две независимые настройки развёртывания: DEMO_MODE=0 и STORE_READY=1. Из панели включить продажи нельзя.</p></div></div>';
+      ''
   }
   if(state.panel==="analytics"){
     const statuses=Object.entries(d.metrics.ordersByStatus);
@@ -217,9 +363,9 @@ function renderPanel(){
       '<div class="analytics-card"><h3>Экономика</h3><div class="cart-row"><span>Плановая выручка открытых заказов</span><b>'+money(d.metrics.bookedRevenueCents)+'</b></div><div class="cart-row"><span>Валовая маржа завершённых</span><b>'+money(d.metrics.grossMarginCents)+'</b></div><p class="small">Фактические банковские платежи не подключены. Метрики — только данные ручного учёта и тестовые заказы.</p></div></div>';
   }
 }
-function field(label,name,value,type="text"){
+function field(label,name,value,type="text",required=true){
   const extra=type==="number"?' min="0" step="'+(name==="stock"?"1":"0.01")+'"':"";
-  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'"'+extra+' required></label>';
+  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'"'+extra+(required?' required':'')+'></label>';
 }
 function openEditor(kind,id=0,selectedProductId=0){
   if(!state.me?.admin)return;
@@ -231,17 +377,22 @@ function openEditor(kind,id=0,selectedProductId=0){
     $("editor-title").textContent=id?"Изменить изделие":"Новое изделие";
     html=field("Название","name",p.name)+
       '<label>Категория<select name="categoryId">'+d.categories.map(c=>'<option value="'+c.id+'" '+(c.id===p.category_id?"selected":"")+'>'+esc(c.name)+'</option>').join("")+'</select></label>'+
+      field("Или новая категория","newCategory","","text",false)+
       '<label>Описание<textarea name="description" rows="3">'+esc(p.description)+'</textarea></label>'+
+      '<label>Таблица размеров<select name="sizeChart"><option value="">Нет</option>'+[...new Set([...(d.sizeCharts||[]),...(p.size_chart?[p.size_chart]:[])])].map(x=>'<option value="'+esc(x)+'" '+(x===p.size_chart?"selected":"")+'>'+esc(x.split("/")[2]==="fire-hook-jeans"?"Джинсы":x.split("/")[2]==="why-always-drunk-tee"?"Футболка":x.split("/")[2])+'</option>').join("")+'</select></label>'+
+      (id?'<div class="photo-manage"><b>Фото</b><div>'+(p.images||[]).map((src,i)=>'<span><img alt="" src="'+esc(src)+'"><button type="button" data-remove-photo="'+i+'" data-product="'+id+'" aria-label="Убрать фото">×</button></span>').join("")+'</div><small>Добавить фото можно кнопкой «Фото» в списке изделий.</small></div>':
+       field("Размеры через запятую","sizes","S, M, L, XL")+field("Цвет","color","")+field("Цена, ₽","priceRub","","number")+field("Себестоимость, ₽","costRub","0","number")+field("Остаток каждого размера, шт.","stock","1","number")+'<small>Фото добавите кнопкой «Фото» после сохранения.</small>')+
       '<label><input type="checkbox" name="active" '+(p.active?"checked":"")+' style="width:auto;display:inline"> Показывать в каталоге</label>';
   }else if(kind==="variant"){
     const v=d.variants.find(x=>x.id===id);
     const current=v||{product_id:selectedProductId,sku:"",size:"one size",color:"",price_cents:0,cost_cents:0,stock:0,active:1};
     $("editor-title").textContent=v?"Изменить вариант":"Новый вариант";
     html='<label>Изделие<select name="productId">'+d.products.map(x=>'<option value="'+x.id+'" '+(x.id===current.product_id?"selected":"")+'>'+esc(x.name)+'</option>').join("")+'</select></label>'+
-      field("Артикул (латиница, цифры, - и _)","sku",current.sku)+field("Размер","size",current.size)+field("Цвет","color",current.color)+
+      field("Артикул (можно оставить пустым)","sku",current.sku,"text",false)+field("Размер","size",current.size)+field("Цвет","color",current.color)+
       field("Цена, ₽","priceRub",(current.price_cents/100).toFixed(2),"number")+
       field("Себестоимость, ₽","costRub",(current.cost_cents/100).toFixed(2),"number")+
       field("Остаток, шт.","stock",current.stock,"number")+
+      '<small>Нет в наличии — поставьте остаток 0.</small>'+
       '<label><input type="checkbox" name="active" '+(current.active?"checked":"")+' style="width:auto;display:inline"> Активный вариант</label>';
   }else if(kind==="order"){
     const o=d.orders.find(x=>x.id===id);if(!o)return;
@@ -270,7 +421,8 @@ async function saveEditor(e){
   const form=new FormData(e.currentTarget),get=k=>String(form.get(k)||"").trim();
   let path,body;
   if(kind==="product"){
-    path="/api/admin/product";body={id,name:get("name"),categoryId:Number(get("categoryId")),description:get("description"),active:form.has("active")};
+    path="/api/admin/product";body={id,name:get("name"),categoryId:Number(get("categoryId")),newCategory:get("newCategory"),description:get("description"),sizeChart:get("sizeChart"),active:form.has("active")};
+    if(!id)Object.assign(body,{sizes:get("sizes"),color:get("color"),priceCents:Math.round(Number(get("priceRub"))*100),costCents:Math.round(Number(get("costRub"))*100),stock:Number(get("stock"))});
   }else if(kind==="variant"){
     path="/api/admin/variant";body={id:state.dashboard.variants.some(x=>x.id===id)?id:0,productId:Number(get("productId")),
       sku:get("sku"),size:get("size"),color:get("color"),
@@ -307,7 +459,7 @@ async function init(){
   configureTelegramBackNavigation(app,go);
   syncTelegramBackButton(app,state.view);
   document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>go(b.dataset.view)));
-  $("explore").addEventListener("click",()=>go("catalog"));
+  $("explore").addEventListener("click",()=>{haptic();$("view-catalog").scrollIntoView({behavior:"smooth",block:"start"})});
   $("cart-top").addEventListener("click",()=>go("cart"));
   $("refresh-admin").addEventListener("click",()=>safeRun(loadAdmin));
   $("filters").addEventListener("click",e=>{
@@ -331,7 +483,58 @@ async function init(){
     const card=e.target.closest("[data-open]");
     if(card){haptic();openSheet(Number(card.dataset.open))}
   });
+  $("hero-media").addEventListener("click",e=>{
+    const slide=e.target.closest("[data-open]");
+    if(slide){haptic();openSheet(Number(slide.dataset.open))}
+  });
   const sheet=$("product-sheet");
+  [sheet,$("view-reviews")].forEach(root=>{
+    root.addEventListener("input",e=>{if(e.target.matches(".review-form textarea"))state.reviewDraft.text=e.target.value});
+    root.addEventListener("click",e=>{
+      const star=e.target.closest("[data-star]");
+      if(star){
+        haptic();
+        state.reviewDraft.rating=Number(star.dataset.star);
+        star.parentElement.querySelectorAll("[data-star]").forEach(el=>{
+          const n=Number(el.dataset.star);
+          el.classList.toggle("on",n<=state.reviewDraft.rating);
+          el.setAttribute("aria-checked",String(n===state.reviewDraft.rating));
+        });
+        return;
+      }
+      const hide=e.target.closest("[data-hide-review]");
+      if(hide){
+        const productId=Number(hide.dataset.product);
+        safeRun(async()=>{
+          await api("/api/admin/review/hide","POST",{id:Number(hide.dataset.hideReview)});
+          await loadCatalog();
+          await loadReviews(productId);
+          if(state.view==="reviews")await loadAllReviews();
+        });
+        return;
+      }
+      const open=e.target.closest(".review-product[data-open]");
+      if(open){haptic();openSheet(Number(open.dataset.open))}
+    });
+    root.addEventListener("submit",e=>{
+      const form=e.target.closest(".review-form");
+      if(!form)return;
+      e.preventDefault();
+      const submit=form.querySelector('[type="submit"]');
+      const productId=Number(form.dataset.product||form.elements.product?.value);
+      if(!state.reviewDraft.rating){toast("Поставьте оценку",true);return}
+      submit.disabled=true;
+      safeRun(async()=>{
+        await api("/api/reviews","POST",{productId,rating:state.reviewDraft.rating,text:state.reviewDraft.text});
+        state.reviewDraft={rating:0,text:""};
+        haptic("success");
+        toast("Спасибо за отзыв");
+        await loadCatalog();
+        await loadReviews(productId);
+        if(state.view==="reviews")await loadAllReviews();
+      }).finally(()=>{submit.disabled=false});
+    });
+  });
   sheet.addEventListener("cancel",e=>{e.preventDefault();closeSheet()});
   sheet.addEventListener("click",e=>{
     if(e.target===sheet||e.target.closest("[data-sheet-close]")){closeSheet();return}
@@ -339,14 +542,20 @@ async function init(){
     if(select){haptic();state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);openSheet(Number(select.dataset.product));return}
     const add=e.target.closest("[data-add]");
     if(add)safeRun(async()=>{
-      if(!canUse()){openLink("https://t.me/atelier_customwear_2611_bot");return}
+      if(!canUse()){
+        // Inside Telegram the bot link would reopen this same chat and appear to do nothing.
+        if(initData)throw Error("Не удалось войти. Закройте витрину и откройте её заново");
+        openLink("https://t.me/atelier_customwear_2611_bot");
+        return;
+      }
       const variantId=state.selected[Number(add.dataset.add)];
       if(!variantId||state.pendingCart)return;
       state.pendingCart=true;
       add.disabled=true;
+      add.textContent="Добавляем…";
+      haptic("medium");
       try{
         await api("/api/cart","POST",{variantId,delta:1});
-        haptic("medium");
         closeSheet();
         toast("Добавлено в корзину");
         await loadCart();
@@ -359,7 +568,27 @@ async function init(){
   $("done-body").addEventListener("click",e=>{
     const link=e.target.closest("[data-manager-link]");
     if(link){e.preventDefault();openLink(link.href);return}
-    if(e.target.closest("[data-view-link]"))go("catalog");
+    const target=e.target.closest("[data-view-link]");
+    if(target)go(target.dataset.viewLink);
+  });
+  $("open-orders").addEventListener("click",()=>go("orders"));
+  $("orders-list").addEventListener("click",e=>{
+    const link=e.target.closest("[data-manager-link]");
+    if(link){e.preventDefault();openLink(link.href)}
+  });
+  if(nativeCheckout()){
+    $("checkout-submit").hidden=true;
+    app.MainButton.onClick(()=>$("checkout-form").requestSubmit());
+  }
+  $("editor-fields").addEventListener("click",e=>{
+    const remove=e.target.closest("[data-remove-photo]");
+    if(!remove)return;
+    const productId=Number(remove.dataset.product);
+    safeRun(async()=>{
+      await api("/api/admin/product/photo-remove","POST",{id:productId,index:Number(remove.dataset.removePhoto)});
+      await loadCatalog();await loadAdmin();
+      openEditor("product",productId);
+    });
   });
   $("cart-body").addEventListener("click",e=>{
     const b=e.target.closest("[data-qty]");
@@ -402,6 +631,13 @@ async function init(){
       else window.open(link,"_blank","noopener,noreferrer");
     }
     if(b.dataset.createProduct)openEditor("product",0);
+    if(b.dataset.toggleProduct){
+      const p=state.dashboard.products.find(x=>x.id===Number(b.dataset.toggleProduct));
+      if(p)safeRun(async()=>{
+        await api("/api/admin/product","POST",{id:p.id,name:p.name,description:p.description,categoryId:p.category_id,sizeChart:p.size_chart,active:!p.active});
+        await loadCatalog();await loadAdmin();
+      });
+    }
     if(b.dataset.variant)openEditor("variant",Number(b.dataset.variant));
     if(b.dataset.newVariant)openEditor("variant",0,Number(b.dataset.newVariant));
     if(b.dataset.order)openEditor("order",Number(b.dataset.order));
@@ -434,9 +670,11 @@ async function init(){
     });
   });
   $("editor-form").addEventListener("submit",saveEditor);
-  await safeRun(loadCatalog);
+  restoreCatalog();
+  const catalogReady=safeRun(loadCatalog);
   if(!state.catalog)renderProducts();
-  await loadMe();
+  await Promise.all([loadMe(),catalogReady]);
+  if(state.openProduct&&$("product-sheet").open)openSheet(state.openProduct);
   await safeRun(loadCart);
 }
 init();

@@ -21,9 +21,16 @@ export function outboxStatements(db,env,kind,customerTelegramId,orderIdSql,order
   ).bind(eventType,...orderIdBinds,recipient));
 }
 
+// The seller can act from the notification itself, without commands or the panel.
+const sellerButtons=orderId=>({inline_keyboard:[
+  [{text:"✅ Подтвердить",callback_data:"st:"+orderId+":confirmed"}],
+  [{text:"Отменить",callback_data:"stc:"+orderId}]
+]});
+const buyerLines=order=>"Покупатель: "+(order.contact_name||"—")+"\nКонтакт: "+(order.contact_phone||"—")+"\nПолучение: "+(order.delivery_address||"—");
+
 async function render(env,row){
   const demo=demoMode(env);
-  const order=await env.DB.prepare("SELECT id,kind,total_cents FROM orders WHERE id=?").bind(row.order_id).first();
+  const order=await env.DB.prepare("SELECT id,kind,total_cents,contact_name,contact_phone,delivery_address,custom_details,custom_measurements FROM orders WHERE id=?").bind(row.order_id).first();
   if(!order)return null;
   if(row.event_type==="catalog_customer"){
     if(demo)return {text:"Тестовый заказ №"+order.id+" создан. Оплата не проводилась."};
@@ -31,15 +38,21 @@ async function render(env,row){
     return {text:"Заказ №"+order.id+" принят на сумму "+rubles(order.total_cents)+". Оплату и получение согласуйте с менеджером в личных сообщениях.",
       reply_markup:managerKeyboard(managerUrl(env,orderDraft(order.id,items,order.total_cents)))};
   }
-  if(row.event_type==="catalog_admin")
-    return {text:(demo?"Новый демо-заказ №":"Новый заказ №")+order.id+" (каталог), сумма "+rubles(order.total_cents)+"\n/admin — управление"};
+  if(row.event_type==="catalog_admin"){
+    const lines=(await env.DB.prepare("SELECT product_name AS name,size,color,quantity FROM order_items WHERE order_id=? ORDER BY id").bind(order.id).all()).results||[];
+    return {text:(demo?"Новый демо-заказ №":"Новый заказ №")+order.id+" (каталог), сумма "+rubles(order.total_cents)+"\n"+
+      lines.map(x=>"• "+x.name+", "+x.size+", "+x.color+" × "+x.quantity).join("\n")+"\n\n"+buyerLines(order),
+      reply_markup:sellerButtons(order.id)};
+  }
   if(row.event_type==="custom_customer"){
     if(demo)return {text:"Тестовая заявка на индивидуальный пошив №"+order.id+" получена. Цену и сроки согласует менеджер."};
     return {text:"Заявка на индивидуальный пошив №"+order.id+" получена. Цену и сроки согласует менеджер.",
       reply_markup:managerKeyboard(managerUrl(env,customDraft(order.id)))};
   }
   if(row.event_type==="custom_admin")
-    return {text:(demo?"Новая демо-заявка на пошив №":"Новая заявка на пошив №")+order.id+"\n/admin — управление"};
+    return {text:(demo?"Новая демо-заявка на пошив №":"Новая заявка на пошив №")+order.id+"\n"+
+      String(order.custom_details||"").slice(0,1500)+"\nМерки: "+String(order.custom_measurements||"—").slice(0,800)+"\n\n"+buyerLines(order)+
+      "\n\nЦену задайте командой: /quote "+order.id+" ЦЕНА СЕБЕСТОИМОСТЬ"};
   return null;
 }
 

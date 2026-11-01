@@ -16,20 +16,25 @@ export async function verifyTelegramInitData(initData,token,now=Math.floor(Date.
   const date=params.get("auth_date");
   if(!/^\d{10}$/.test(date||"")||params.getAll("auth_date").length!==1)return null;
   const ts=Number(date);
-  if(!Number.isSafeInteger(ts)||ts>now+30||now-ts>600)return null;
+  // initData is fixed when the app opens, so a short limit would log out anyone who browses for a while.
+  if(!Number.isSafeInteger(ts)||ts>now+30||now-ts>86400)return null;
   const fields=[];
   for(const [k,v] of params.entries()){
-    if(k==="hash"||k==="signature")continue;
+    if(k==="hash")continue;
     if(!/^[a-zA-Z_]{1,48}$/.test(k)||params.getAll(k).length!==1)return null;
     fields.push([k,v]);
   }
   fields.sort((a,b)=>a[0].localeCompare(b[0],"en"));
-  const data=fields.map(([k,v])=>k+"="+v).join("\n");
+  const checkString=list=>list.map(([k,v])=>k+"="+v).join("\n");
   const derivation=await key(encoder.encode("WebAppData"));
   const secret=await sign(derivation,token);
   const verifyKey=await key(secret);
-  const expected=await sign(verifyKey,data);
-  if(!equal(expected,bytesFromHex(hash)))return null;
+  // Telegram signs every field except hash, including signature on current clients.
+  // Clients that omit it are covered by the same list; both forms need the bot token.
+  const given=bytesFromHex(hash);
+  const signed=equal(await sign(verifyKey,checkString(fields)),given)||
+    equal(await sign(verifyKey,checkString(fields.filter(([k])=>k!=="signature"))),given);
+  if(!signed)return null;
   let user;
   try{user=JSON.parse(params.get("user")||"null")}catch{return null}
   if(!user||!Number.isSafeInteger(user.id)||user.id<=0||user.is_bot)return null;

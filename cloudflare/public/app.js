@@ -95,7 +95,7 @@ async function loadAdmin(){
   state.dashboard=await api("/api/admin/dashboard");
   const m=state.dashboard.metrics;
   $("metrics").innerHTML=[
-    ["Заказов",String(m.orderCount),"за всё время (до 100)"],
+    ["Заказов",String(m.orderCount),"за всё время"],
     ["Новые",String(m.ordersByStatus.new||0),"требуют внимания"],
     ["Учётные поступления",money(m.paidNetCents),"вручную, не от банка"],
     ["Мало на складе",String(m.lowStockCount),"варианты ≤ 3 шт."]

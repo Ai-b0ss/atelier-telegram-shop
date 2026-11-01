@@ -82,7 +82,16 @@ export async function handleApi(request,env,url){
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
     const products=await rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,p.images,p.size_chart,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY photo_available DESC,p.id LIMIT 150").then(list=>list.map(withGallery));
     const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600");
-    return json({ok:true,demo:demoMode(env),manager:managerUsername(env),categories,products,variants});
+    const ratings=await rows(env.DB,"SELECT product_id,ROUND(AVG(rating),1) AS rating,COUNT(*) AS reviews FROM reviews WHERE hidden=0 GROUP BY product_id");
+    const rated=new Map(ratings.map(x=>[x.product_id,x]));
+    const withRating=products.map(p=>({...p,rating:rated.get(p.id)?.rating??null,reviews:rated.get(p.id)?.reviews??0}));
+    return json({ok:true,demo:demoMode(env),manager:managerUsername(env),categories,products:withRating,variants});
+  }
+  if(request.method==="GET"&&path==="/api/reviews"){
+    const productId=Number(url.searchParams.get("product"));
+    if(!Number.isSafeInteger(productId)||productId<1)return err("Unknown product");
+    const reviews=await rows(env.DB,"SELECT id,author_name,rating,body,updated_at FROM reviews WHERE product_id=? AND hidden=0 ORDER BY updated_at DESC,id DESC LIMIT 50",productId);
+    return json({ok:true,reviews});
   }
   const auth=request.headers.get("Authorization")||"";
   if(!auth.startsWith("tma "))return err("Open via Telegram",401);
@@ -195,6 +204,28 @@ export async function handleApi(request,env,url){
     if(!orderId)return err("Order committed but confirmation could not be retrieved; contact support.",503);
     try{await deliverOutbox(env,{orderId})}catch{}
     return json({ok:true,orderId,managerUrl:managerUrl(env,orderDraft(orderId,items,total))});
+  }
+  if(request.method==="POST"&&path==="/api/reviews"){
+    const b=await safeBody(request),productId=Number(b.productId),rating=Number(b.rating),body=text(b.text,1000);
+    if(!Number.isSafeInteger(productId)||productId<1||!Number.isInteger(rating)||rating<1||rating>5)return err("Поставьте оценку от 1 до 5");
+    if(body.length<3)return err("Напишите пару слов о вещи");
+    const product=await first(env.DB,"SELECT id,name FROM products WHERE id=? AND active=1",productId);
+    if(!product)return err("Товар не найден",404);
+    const c=await getCustomer(env.DB,u);
+    // A second review of the same product replaces the first and is published again.
+    await run(env.DB,"INSERT INTO reviews(product_id,customer_id,author_name,rating,body) VALUES(?,?,?,?,?) "+
+      "ON CONFLICT(product_id,customer_id) DO UPDATE SET author_name=excluded.author_name,rating=excluded.rating,body=excluded.body,hidden=0,updated_at=CURRENT_TIMESTAMP",
+      productId,c.id,text(u.first_name,40)||"Покупатель",rating,body);
+    for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>x.trim()).filter(Boolean)){
+      try{await telegramSend(env,adminId,"Новый отзыв на «"+product.name+"», оценка "+rating+":\n"+body)}catch{}
+    }
+    return json({ok:true});
+  }
+  if(request.method==="POST"&&path==="/api/admin/review/hide"){
+    const b=await safeBody(request),id=Number(b.id);
+    if(!Number.isSafeInteger(id)||id<1)return err("Unknown review");
+    const done=await run(env.DB,"UPDATE reviews SET hidden=1 WHERE id=?",id);
+    return done.meta.changes===1?json({ok:true}):err("Отзыв не найден",404);
   }
   if(request.method==="POST"&&path==="/api/custom"){
     const b=await safeBody(request),requestKey=text(b.requestKey,64);

@@ -56,7 +56,7 @@ export function makeHandler(env) {
     ]);
     buttons.inline_keyboard.unshift([{text:"Открыть Mini App — витрина ↗",
       web_app:{url:"https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev/app"}}]);
-    return send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Ателье авторской одежды. Выберите действие:",buttons);
+    return send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Ателье авторской одежды. Выберите действие:\nОтзывы покупателей: /reviews",buttons);
   };
   async function catalogue(id) {
     const cs=await rows(db,"SELECT c.id,c.name,COUNT(p.id) AS items FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.active=1 GROUP BY c.id ORDER BY c.name");
@@ -399,6 +399,11 @@ export function makeHandler(env) {
     }
     if(cmd==="/cancel"){await delSession(id);return send(id,"Ввод отменён. /start — главное меню.")}
     if(cmd==="/privacy")return send(id,"Храним данные Telegram, контакты, сведения о заказах и мерках в Cloudflare D1. Данные видны администратору. Оплаты учитываются только вручную. /forgetme — обезличить закрытые заказы.");
+    if(cmd==="/reviews"){
+      const list=(await db.prepare("SELECT r.author_name,r.rating,r.body,p.name FROM reviews r JOIN products p ON p.id=r.product_id WHERE r.hidden=0 AND p.active=1 ORDER BY r.updated_at DESC LIMIT 5").all()).results||[];
+      if(!list.length)return send(id,"Отзывов пока нет. Оставить первый можно в карточке вещи в витрине.");
+      return send(id,list.map(x=>"★".repeat(x.rating)+" "+x.name+"\n"+x.body+"\n— "+x.author_name).join("\n\n")+"\n\nОставить отзыв можно в карточке вещи в витрине.");
+    }
     if(cmd==="/forgetme"){
       const c=await customer(u);
       const open=await first(db,"SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status NOT IN ('completed','canceled')",c.id);
@@ -413,6 +418,7 @@ export function makeHandler(env) {
         db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
         db.prepare("DELETE FROM checkout_requests WHERE telegram_id=?").bind(id),
         db.prepare("DELETE FROM sessions WHERE telegram_id=?").bind(id),
+        db.prepare("DELETE FROM reviews WHERE customer_id=?").bind(c.id),
         db.prepare("UPDATE customers SET telegram_id=-id,full_name='',username='' WHERE id=?").bind(c.id)
       ]);
       return send(id,"Контакты, мерки и связь закрытых заказов с вашим Telegram ID удалены. Учётные записи операций сохраняются без ваших контактных данных.");

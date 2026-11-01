@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <meta name="theme-color" content="#f3f0e9"/>
 <title>Ателье — авторская одежда</title>
-<meta name="description" content="Ателье авторской одежды: коллекция, индивидуальный пошив и управление заказами."/>
+<meta name="description" content="Ателье авторской одежды: коллекция и индивидуальный пошив."/>
 <link rel="stylesheet" href="/style.css"/>
 <link rel="stylesheet" href="/atelier.css"/>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -15,17 +15,18 @@
 <div class="shell">
 <header class="topbar">
  <a class="wordmark" href="/app" aria-label="Ателье, главная">АТЕЛЬЕ</a>
- <div class="top-actions"><span class="environment" id="environment" hidden>ДЕМО</span><button class="icon-button" id="cart-top" aria-label="Открыть корзину"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h14l-1 13H6L5 8Z"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/></svg> <span id="cart-count" class="is-empty">0</span></button></div>
+ <div class="top-actions"><span class="environment" id="environment" hidden></span><button class="icon-button" id="cart-top" aria-label="Открыть корзину"><svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h14l-1 13H6L5 8Z"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/></svg> <span id="cart-count" class="is-empty">0</span></button></div>
 </header>
 <main>
-<section class="hero">
+<section class="hero" id="hero">
+ <div class="hero-media" id="hero-media"></div>
+ <div class="hero-bars" id="hero-bars" aria-hidden="true"></div>
  <div class="hero-body"><span class="eyebrow">Самовывоз у метро Беляево</span>
  <h1><span><i>Авторская</i></span><span><i>одежда</i></span></h1>
- <p>Выберите готовую вещь или закажите пошив по своей идее. Детали обсудим с вами лично в Telegram.</p>
+ <p>Готовые вещи и пошив по вашей идее. Детали обсудим лично в Telegram.</p>
  <button class="primary" id="explore">Смотреть коллекцию</button></div>
- <div class="ticker" aria-hidden="true"><div><span>Авторские вещи</span><span>Ограниченные тиражи</span><span>Пошив по вашим меркам</span><span>Личное общение в Telegram</span><span>Авторские вещи</span><span>Ограниченные тиражи</span><span>Пошив по вашим меркам</span><span>Личное общение в Telegram</span></div></div>
 </section>
-<div class="notice" id="demo-notice" role="status" hidden><span class="notice-dot"></span><strong>Тестовая версия.</strong> Изделия и цены вымышленные, реальные заказы отключены.</div>
+<div class="notice" id="demo-notice" role="status" hidden><span class="notice-dot"></span></div>
 <section id="view-catalog" class="view active">
  <div class="section-heading"><div><h2>Коллекция</h2></div><span id="product-count" class="section-count"></span></div>
  <div class="filters" id="filters" aria-label="Категории"></div>

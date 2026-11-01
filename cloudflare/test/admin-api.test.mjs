@@ -499,3 +499,34 @@ test("idempotency keys cannot silently alias different order kinds",async()=>{
     assert.equal((await originalCustom.json()).duplicate,true);
   }finally{globalThis.fetch=originalFetch;raw.close()}
 });
+
+test("customers review a product once, abuse can be hidden and anyone can read",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"100",DEMO_MODE:"0",STORE_READY:"1"};
+  const original=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true});
+  try{
+    const product=DB.raw.prepare("SELECT id FROM products WHERE active=1 LIMIT 1").get().id;
+    const buyer=makeInitData(200);
+    const post=(body,auth=buyer)=>call(env,"/api/reviews","POST",body,auth);
+    assert.equal((await post({productId:product,rating:6,text:"Отлично сидит"})).status,400);
+    assert.equal((await post({productId:product,rating:5,text:"  "})).status,400);
+    assert.equal((await post({productId:999999,rating:5,text:"Отлично сидит"})).status,404);
+    assert.equal((await post({productId:product,rating:5,text:"<b>Отлично</b> сидит"})).status,200);
+    assert.equal((await post({productId:product,rating:3,text:"Подумал ещё раз"})).status,200);
+    const read=async()=>{
+      const request=new Request(workerUrl+"/api/reviews?product="+product);
+      return (await (await handleApi(request,env,new URL(request.url))).json()).reviews;
+    };
+    const [review,...others]=await read();
+    assert.equal(others.length,0,"a repeat review replaces the first");
+    assert.equal(review.rating,3);
+    assert.equal(review.telegram_id,undefined);
+    const catalogRequest=new Request(workerUrl+"/api/catalog");
+    const catalog=await (await handleApi(catalogRequest,env,new URL(catalogRequest.url))).json();
+    assert.equal(catalog.products.find(p=>p.id===product).reviews,1);
+    assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},buyer)).status,403);
+    assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},makeInitData(100))).status,200);
+    assert.equal((await read()).length,0);
+  }finally{globalThis.fetch=original}
+});

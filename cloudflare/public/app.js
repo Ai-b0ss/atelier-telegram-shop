@@ -1,7 +1,7 @@
 import {productCountLabel, syncTelegramBackButton, configureTelegramBackNavigation} from "./ui-helpers.js";
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
-const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
+const state={reviews:{},reviewDraft:{rating:0,text:""},catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
 if(app){try{app.ready();app.expand();app.setHeaderColor("#f3f0e9");app.setBackgroundColor("#f3f0e9")}catch{}}
 const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -62,9 +62,54 @@ async function loadCatalog(){
   state.catalog=await api("/api/catalog");
   applyMode();
   $("product-count").textContent=productCountLabel(state.catalog.products.length);
-  const categories=[{id:0,name:"Всё"},...state.catalog.categories];
+  const stocked=new Set(state.catalog.products.map(p=>p.category_id));
+  const categories=[{id:0,name:"Всё"},...state.catalog.categories.filter(c=>stocked.has(c.id))];
   $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
   renderProducts();
+  renderHero();
+}
+const heroState={slides:[],at:0,timer:0};
+const SLIDE_MS=5000;
+function showSlide(at){
+  heroState.at=at;
+  $("hero-media").querySelectorAll(".hero-slide").forEach((el,i)=>el.classList.toggle("on",i===at));
+  $("hero-bars").querySelectorAll("i").forEach((el,i)=>{el.classList.toggle("done",i<at);el.classList.toggle("on",i===at)});
+  clearTimeout(heroState.timer);
+  if(heroState.slides.length>1&&!matchMedia("(prefers-reduced-motion:reduce)").matches)
+    heroState.timer=setTimeout(()=>showSlide((at+1)%heroState.slides.length),SLIDE_MS);
+}
+async function renderHero(){
+  const shots=(state.catalog?.products||[]).flatMap(p=>p.images?.length?[{id:p.id,name:p.name,src:p.images[0]}]:[]);
+  // Low-resolution shots would look soft at full width, so the hero only uses sharp ones.
+  const sharp=await Promise.all(shots.map(shot=>new Promise(done=>{
+    const probe=new Image();
+    probe.onload=()=>done(probe.naturalWidth>=600?shot:null);
+    probe.onerror=()=>done(null);
+    probe.src=shot.src;
+  })));
+  heroState.slides=sharp.filter(Boolean);
+  if(!heroState.slides.length)return;
+  $("hero").classList.add("has-media");
+  $("hero-media").innerHTML=heroState.slides.map(x=>'<button type="button" class="hero-slide" data-open="'+x.id+'" aria-label="'+esc(x.name)+'"><img alt="" src="'+esc(x.src)+'"></button>').join("");
+  $("hero-bars").innerHTML=heroState.slides.length>1?heroState.slides.map(()=>'<i></i>').join(""):"";
+  showSlide(0);
+}
+const stars=n=>"★".repeat(n)+"☆".repeat(5-n);
+const reviewDate=value=>{const d=new Date(String(value).replace(" ","T")+"Z");return isNaN(d)?"":d.toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"})};
+function reviewsHtml(p){
+  const list=state.reviews[p.id];
+  const items=!list?'<p class="review-note">Загружаем отзывы…</p>':list.length?list.map(r=>'<article class="review"><div class="review-top"><b>'+esc(r.author_name)+'</b><span class="review-stars" aria-label="Оценка '+Number(r.rating)+' из 5">'+stars(Number(r.rating))+'</span></div><p>'+esc(r.body)+'</p><small>'+esc(reviewDate(r.updated_at))+'</small>'+(state.me?.admin?'<button type="button" class="quiet" data-hide-review="'+Number(r.id)+'" data-product="'+p.id+'">Скрыть</button>':'')+'</article>').join(""):'<p class="review-note">Отзывов пока нет. Ваш может быть первым.</p>';
+  const draft=state.reviewDraft;
+  const form=canUse()?'<form class="review-form" data-product="'+p.id+'"><div class="star-pick" role="radiogroup" aria-label="Оценка">'+[1,2,3,4,5].map(n=>'<button type="button" role="radio" aria-checked="'+(draft.rating===n)+'" aria-label="'+n+' из 5" data-star="'+n+'" class="'+(draft.rating>=n?"on":"")+'">★</button>').join("")+'</div><textarea name="text" maxlength="1000" rows="3" placeholder="Как сидит, что понравилось…">'+esc(draft.text)+'</textarea><button type="submit" class="primary">Оставить отзыв</button></form>':'<p class="review-note">Оставить отзыв можно в Telegram.</p>';
+  return '<section class="reviews"><h4>Отзывы'+(p.reviews?' <span>'+esc(String(p.rating).replace(".",","))+' ★ · '+Number(p.reviews)+'</span>':'')+'</h4>'+items+form+'</section>';
+}
+async function loadReviews(productId){
+  const result=await api("/api/reviews?product="+productId);
+  state.reviews[productId]=result.reviews;
+  const sheet=$("product-sheet");
+  const holder=$("sheet-content").querySelector(".reviews");
+  const product=state.catalog?.products.find(x=>x.id===productId);
+  if(sheet.open&&holder&&product&&state.openProduct===productId)holder.outerHTML=reviewsHtml(product);
 }
 function renderProducts(){
   if(!state.catalog){
@@ -80,7 +125,7 @@ function renderProducts(){
     const label=!variants.length?"Нет в наличии":(Math.max(...prices)>low?"от ":"")+money(low);
     return '<button type="button" class="product-card'+(variants.length?"":" is-sold")+'" style="--i:'+idx+'" data-open="'+p.id+'">'+
       '<span class="product-photo">'+photoHtml(p)+'</span>'+
-      '<span class="product-meta"><b>'+esc(p.name)+'</b><span>'+esc(label)+'</span></span></button>';
+      '<span class="product-meta"><b>'+esc(p.name)+'</b><span>'+esc(label)+(p.reviews?' · ★ '+esc(String(p.rating).replace(".",",")):'')+'</span></span></button>';
   }).join(""):'<div class="card padded empty">В этой категории пока ничего нет.</div>';
 }
 function galleryHtml(p){
@@ -91,6 +136,8 @@ function galleryHtml(p){
 }
 function openSheet(productId){
   const p=state.catalog?.products.find(x=>x.id===productId);if(!p)return;
+  if(state.openProduct!==productId)state.reviewDraft={rating:0,text:""};
+  state.openProduct=productId;
   const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
   const remembered=state.selected[p.id];
   const choice=variants.find(v=>v.id===remembered)||variants[0];
@@ -106,7 +153,8 @@ function openSheet(productId){
     (variants.length?'<span class="sheet-label">Размер и цвет</span><div class="variants">'+variants.map(v=>'<button type="button" class="variant-pill '+(choice.id===v.id?"selected":"")+'" aria-pressed="'+(choice.id===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'">'+esc(v.size)+'<small>'+esc(v.color)+'</small></button>').join("")+'</div>':'')+
     (p.size_chart?'<details class="size-chart"'+(chartOpen?" open":"")+'><summary>Таблица размеров</summary><img alt="Таблица размеров: талия, бёдра, посадка и длина в сантиметрах" decoding="async" src="'+esc(p.size_chart)+'"></details>':'')+
     '<div class="stock-hint">'+(choice&&choice.stock<=3?(choice.stock===1?"Последняя вещь":"Осталось: "+choice.stock):"")+'</div>'+
-    '<button type="button" class="primary" data-add="'+p.id+'" '+(variants.length?"":"disabled")+'>'+action+'</button></div>';
+    '<button type="button" class="primary" data-add="'+p.id+'" '+(variants.length?"":"disabled")+'>'+action+'</button>'+reviewsHtml(p)+'</div>';
+  if(!state.reviews[productId])safeRun(()=>loadReviews(productId));
   const sheet=$("product-sheet");
   sheet.classList.remove("closing");
   if(!sheet.open)sheet.showModal();
@@ -325,7 +373,7 @@ async function init(){
   configureTelegramBackNavigation(app,go);
   syncTelegramBackButton(app,state.view);
   document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>go(b.dataset.view)));
-  $("explore").addEventListener("click",()=>go("catalog"));
+  $("explore").addEventListener("click",()=>{haptic();$("view-catalog").scrollIntoView({behavior:"smooth",block:"start"})});
   $("cart-top").addEventListener("click",()=>go("cart"));
   $("refresh-admin").addEventListener("click",()=>safeRun(loadAdmin));
   $("filters").addEventListener("click",e=>{
@@ -349,12 +397,53 @@ async function init(){
     const card=e.target.closest("[data-open]");
     if(card){haptic();openSheet(Number(card.dataset.open))}
   });
+  $("hero-media").addEventListener("click",e=>{
+    const slide=e.target.closest("[data-open]");
+    if(slide){haptic();openSheet(Number(slide.dataset.open))}
+  });
   const sheet=$("product-sheet");
+  sheet.addEventListener("input",e=>{if(e.target.matches(".review-form textarea"))state.reviewDraft.text=e.target.value});
+  sheet.addEventListener("submit",e=>{
+    const form=e.target.closest(".review-form");
+    if(!form)return;
+    e.preventDefault();
+    const submit=form.querySelector('[type="submit"]'),productId=Number(form.dataset.product);
+    submit.disabled=true;
+    safeRun(async()=>{
+      await api("/api/reviews","POST",{productId,rating:state.reviewDraft.rating,text:state.reviewDraft.text});
+      state.reviewDraft={rating:0,text:""};
+      haptic("success");
+      toast("Спасибо за отзыв");
+      await loadCatalog();
+      await loadReviews(productId);
+    }).finally(()=>{submit.disabled=false});
+  });
   sheet.addEventListener("cancel",e=>{e.preventDefault();closeSheet()});
   sheet.addEventListener("click",e=>{
     if(e.target===sheet||e.target.closest("[data-sheet-close]")){closeSheet();return}
     const select=e.target.closest("[data-choice]");
     if(select){haptic();state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);openSheet(Number(select.dataset.product));return}
+    const star=e.target.closest("[data-star]");
+    if(star){
+      haptic();
+      state.reviewDraft.rating=Number(star.dataset.star);
+      star.parentElement.querySelectorAll("[data-star]").forEach(el=>{
+        const n=Number(el.dataset.star);
+        el.classList.toggle("on",n<=state.reviewDraft.rating);
+        el.setAttribute("aria-checked",String(n===state.reviewDraft.rating));
+      });
+      return;
+    }
+    const hide=e.target.closest("[data-hide-review]");
+    if(hide){
+      const productId=Number(hide.dataset.product);
+      safeRun(async()=>{
+        await api("/api/admin/review/hide","POST",{id:Number(hide.dataset.hideReview)});
+        await loadCatalog();
+        await loadReviews(productId);
+      });
+      return;
+    }
     const add=e.target.closest("[data-add]");
     if(add)safeRun(async()=>{
       if(!canUse()){openLink("https://t.me/atelier_customwear_2611_bot");return}

@@ -18,7 +18,7 @@ function makeInitData(id=777,date=Math.floor(Date.now()/1000)){
 }
 function localDB(){
   const db=new DatabaseSync(":memory:");
-  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql"]){
+  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql"]){
     db.exec(readFileSync(new URL("../"+file,import.meta.url),"utf8"));
   }
   return {
@@ -130,4 +130,62 @@ test("Mini App public demo catalogue, protected admin operations and idempotent 
     assert.equal((await quote.json()).delivered,true);
     assert(sent.some(s=>s.body.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data?.startsWith("qa:")));
   }finally{globalThis.fetch=originalFetch;db.raw.close()}
+});
+
+test("Mini App return endpoint never double restocks shipped orders",async()=>{
+  const storage=localDB(),env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const db=storage.raw;
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Demo')");
+  db.exec("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'catalog','new')");
+  db.exec("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(1,1,'Bag','one size','beige',1,100000,50000)");
+  db.exec("UPDATE variants SET stock=stock-1 WHERE id=1");
+  for(const st of ["confirmed","ready","shipped","canceled"])db.prepare("UPDATE orders SET status=? WHERE id=1").run(st);
+  assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,4);
+  const endpoint="/api/admin/order/return";
+  assert.equal((await call(env,endpoint,"POST",{id:1,physicallyReceived:true,note:"Received"},makeInitData(1234))).status,403);
+  assert.equal((await call(env,endpoint,"POST",{id:1,note:"Received"})).status,400);
+  assert.equal((await call(env,endpoint,"POST",{id:1,physicallyReceived:true,note:"Received by manager"})).status,200);
+  assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+  assert.equal((await call(env,endpoint,"POST",{id:1,physicallyReceived:true,note:"Received again"})).status,409);
+  assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM inventory_return_receipts").get().n,1);
+  db.close();
+});
+
+test("isolated simulated identities: administrator and two separate buyers",async()=>{
+ const storage=localDB(),db=storage.raw;
+ // Only the in-memory test DB enables simulated buyers; production remains demo-only.
+ const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"0",STORE_READY:"1"};
+ const saved=globalThis.fetch;
+ globalThis.fetch=async()=>Response.json({ok:true,result:true});
+ try{
+  const buyers=[888,999];
+  const sharedKey="identicalRequestKey_A123456";
+  const orderIds=[];
+  for(const uid of buyers){
+   const auth=makeInitData(uid);
+   assert.equal((await call(env,"/api/admin/dashboard","GET",null,auth)).status,403);
+   assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1},auth)).status,200);
+   const cart=await (await call(env,"/api/cart","GET",null,auth)).json();
+   assert.equal(cart.items.length,1);
+   assert.equal(cart.items[0].quantity,1);
+  }
+  for(const uid of buyers){
+   const auth=makeInitData(uid);
+   const resp=await call(env,"/api/checkout","POST",{
+     requestKey:sharedKey,name:"Synthetic user",phone:"@testing",address:"Test pickup"
+   },auth);
+   assert.equal(resp.status,200);
+   const orderId=(await resp.json()).orderId;
+   orderIds.push(orderId);
+   assert.equal((await (await call(env,"/api/cart","GET",null,auth)).json()).items.length,0);
+  }
+  assert.notEqual(orderIds[0],orderIds[1],"distinct Telegram users must not share orders");
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM orders WHERE kind='catalog'").get().n,2);
+  assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,3);
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM checkout_requests WHERE request_key=?").get(sharedKey).n,2);
+  const dashboard=await call(env,"/api/admin/dashboard","GET",null,makeInitData(777));
+  assert.equal(dashboard.status,200);
+  assert.equal((await dashboard.json()).orders.length,2);
+ }finally{globalThis.fetch=saved;db.close()}
 });

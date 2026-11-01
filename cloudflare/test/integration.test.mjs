@@ -11,6 +11,7 @@ function database(){
   db.exec(readFileSync(new URL('../migrations/0001_order_status_triggers.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../migrations/0002_miniapp.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../migrations/0003_store_readiness.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0004_shipped_return.sql',import.meta.url),'utf8'));
   return {
     raw: db,
     prepare(sql){
@@ -344,4 +345,38 @@ test('forgetme removes photos and tailoring measurements from completed records'
     assert.equal(order.custom_measurements,"");
     assert.equal(db.prepare("SELECT COUNT(*) n FROM custom_attachments").get().n,0);
   }finally{globalThis.fetch=old;db.close()}
+});
+
+test('shipped cancellation requires a physical inventory return and cannot duplicate the receipt',async()=>{
+ const storage=database(),db=storage.raw;
+ db.prepare("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Admin')").run();
+ db.prepare("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'catalog','new')").run();
+ db.prepare("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(1,1,'Bag','one size','beige',2,250000,100000),(1,2,'Shirt','M','white',3,350000,170000)").run();
+ db.exec("UPDATE variants SET stock=stock-2 WHERE id=1");
+ db.exec("UPDATE variants SET stock=stock-3 WHERE id=2");
+ for(const status of ["confirmed","in_production","ready","shipped"])db.prepare("UPDATE orders SET status=? WHERE id=1").run(status);
+ const expected=[3,5];
+ db.exec("UPDATE orders SET status='canceled' WHERE id=1");
+ assert.deepEqual([db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,db.prepare("SELECT stock FROM variants WHERE id=2").get().stock],expected,
+  "shipped items must not return to warehouse merely because order was cancelled");
+ assert.throws(()=>db.prepare("INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(99,777,'Missing')").run(),/FOREIGN KEY|Physical return|constraint/i);
+ const result=db.prepare("INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(1,777,'Received and counted')").run();
+ assert(result.changes===1);
+ assert.deepEqual([db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,db.prepare("SELECT stock FROM variants WHERE id=2").get().stock],[5,8]);
+ assert.throws(()=>db.prepare("INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(1,777,'Second attempt')").run(),/UNIQUE/);
+ assert.deepEqual([db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,db.prepare("SELECT stock FROM variants WHERE id=2").get().stock],[5,8]);
+ assert.equal(db.prepare("SELECT COUNT(*) n FROM inventory_return_receipts WHERE order_id=1").get().n,1);
+ db.close();
+});
+test('unshipped canceled order restocks automatically and cannot be manually returned again',()=>{
+ const storage=database(),db=storage.raw;
+ db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Admin')");
+ db.exec("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'catalog','new')");
+ db.exec("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(1,1,'Bag','one size','beige',2,250000,100000)");
+ db.exec("UPDATE variants SET stock=stock-2 WHERE id=1");
+ db.exec("UPDATE orders SET status='canceled' WHERE id=1");
+ assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+ assert.throws(()=>db.exec("INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(1,777,'Wrong')"),/Physical return/);
+ assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+ db.close();
 });

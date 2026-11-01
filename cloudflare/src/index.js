@@ -195,7 +195,7 @@ export function makeHandler(env) {
   }
   async function adminCommand(id,u,txt){
     const p=txt.split(/\s+/),cmd=p[0].split("@")[0];
-    if(cmd==="/admin")return send(id,"Управление демо:\n/orders — заказы\n/order ID — детали\n/status ID статус — сменить\n/quote ID цена себестоимость — смета\n/payment ID received|refunded сумма [номер] — ручной учёт\n/report — Excel\n/stats — сводка");
+    if(cmd==="/admin")return send(id,"Управление демо:\n/orders — заказы\n/order ID — детали\n/status ID статус — сменить\n/return ID ПОЛУЧЕНО — учесть физический возврат отправленного товара\n/quote ID цена себестоимость — смета\n/payment ID received|refunded сумма [номер] — ручной учёт\n/report — Excel\n/stats — сводка");
     if(cmd==="/orders"){
       const filter=p[1],valid=!filter||statuses.includes(filter);
       if(!valid)return send(id,"Неизвестный статус.");
@@ -212,6 +212,19 @@ export function makeHandler(env) {
       if(!oid||!statuses.includes(status))return send(id,"Пример: /status 1 confirmed");
       const o=await first(db,"SELECT * FROM orders WHERE id=?",oid);
       return o?setStatus(id,o,status):send(id,"Заказ не найден.");
+    }
+    if(cmd==="/return"){
+      const oid=safeInt(p[1]);
+      if(!oid||p[2]!=="ПОЛУЧЕНО")return send(id,"Только после фактического получения вещи: /return ID ПОЛУЧЕНО");
+      const order=await first(db,"SELECT id,kind,status FROM orders WHERE id=?",oid);
+      if(!order||order.kind!=="catalog"||order.status!=="canceled")
+        return send(id,"Заказ недоступен для возврата на склад.");
+      try{
+        const result=await run(db,
+          "INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(?,?,?)",
+          oid,id,"Подтверждено менеджером в Telegram");
+        return send(id,"Физический возврат заказа №"+oid+" учтён (акт №"+result.meta.last_row_id+"). Остатки восстановлены.");
+      }catch{return send(id,"Возврат невозможен: заказ не отправлялся, уже возвращён или изменён.")}
     }
     if(cmd==="/quote"){
       const oid=safeInt(p[1]),price=money(p[2]),cost=money(p[3]);

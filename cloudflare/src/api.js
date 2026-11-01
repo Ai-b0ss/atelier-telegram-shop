@@ -138,7 +138,7 @@ export async function handleApi(request,env,url){
     const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.sku,v.size,v.color,v.price_cents,v.cost_cents,v.stock,v.active FROM variants v ORDER BY v.id LIMIT 600");
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
     const settings=await first(env.DB,"SELECT * FROM store_settings WHERE id=1");
-    const orders=await rows(env.DB,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at,o.custom_details,o.custom_measurements,(SELECT COUNT(*) FROM custom_attachments a WHERE a.order_id=o.id) AS attachment_count,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC LIMIT 100");
+    const orders=await rows(env.DB,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at,o.custom_details,o.custom_measurements,(SELECT COUNT(*) FROM custom_attachments a WHERE a.order_id=o.id) AS attachment_count,(SELECT COUNT(*) FROM inventory_return_receipts r WHERE r.order_id=o.id) AS return_receipt_count,(SELECT COUNT(*) FROM status_history h WHERE h.order_id=o.id AND h.new_status='shipped') AS shipping_event_count,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC LIMIT 100");
     const payments=await rows(env.DB,"SELECT kind,amount_cents FROM payments ORDER BY id DESC LIMIT 1000");
     const net=payments.reduce((v,p)=>v+(p.kind==="received"?p.amount_cents:-p.amount_cents),0);
     const completed=orders.filter(o=>o.status==="completed");
@@ -213,6 +213,26 @@ export async function handleApi(request,env,url){
     if(updated.meta.changes!==1)return err("Status or payments changed",409);
     try{await telegramSend(env,o.telegram_id,"Статус заказа №"+id+": "+status);}catch{}
     return json({ok:true,id,status});
+  }
+  if(request.method==="POST"&&path==="/api/admin/order/return"){
+    const b=await safeBody(request);
+    const id=integer(b.id),note=text(b.note,300);
+    if(!id||b.physicallyReceived!==true||note.length<4)
+      return err("Confirm actual receipt and add a note");
+    const order=await first(env.DB,
+      "SELECT o.id,o.kind,o.status, "+
+      "EXISTS(SELECT 1 FROM status_history h WHERE h.order_id=o.id AND h.new_status='shipped') AS dispatched, "+
+      "EXISTS(SELECT 1 FROM inventory_return_receipts r WHERE r.order_id=o.id) AS already_returned "+
+      "FROM orders o WHERE o.id=?",id);
+    if(!order)return err("Order not found",404);
+    if(order.kind!=="catalog"||order.status!=="canceled"||!order.dispatched||order.already_returned)
+      return err("This order is not awaiting a physical return",409);
+    try{
+      const result=await run(env.DB,
+        "INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(?,?,?)",
+        id,u.id,note);
+      return json({ok:true,id,receiptId:result.meta.last_row_id});
+    }catch{return err("Return already processed or order changed",409)}
   }
   if(request.method==="POST"&&path==="/api/admin/quote"){
     const b=await safeBody(request),id=integer(b.id),price=money(b.priceCents),cost=money(b.costCents);

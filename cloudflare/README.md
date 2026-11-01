@@ -119,7 +119,8 @@ Cloudflare хранит историю изменений для восстан�
 - `POST /api/custom` — индивидуальная заявка;
 - `GET /api/admin/dashboard`, `POST /api/admin/product`,
   `POST /api/admin/variant`, `POST /api/admin/order/status`,
-  `POST /api/admin/quote`, `POST /api/admin/settings` —
+  `POST /api/admin/quote`, `POST /api/admin/settings`,
+  `POST /api/admin/order/return` —
   только Telegram-администратор, HMAC initData.
 - `GET /media/product/ID` — серверное получение фотографии
   из Telegram с ограничением размера и типа файла; BotFather токен
@@ -133,7 +134,9 @@ Cloudflare хранит историю изменений для восстан�
 Схема: `migrations/0001_order_status_triggers.sql` —
 атомарная отмена с возвратом остатков и история;
 `0002_miniapp.sql` — ключи идемпотентности и фото-референсы;
-`0003_store_readiness.sql` — данные продавца (по умолчанию пустые).
+`0003_store_readiness.sql` — данные продавца (по умолчанию пустые),
+`0004_shipped_return.sql` — защита от ложного пополнения склада
+после отправки и отдельные акты физического возврата.
 Миграции применены к облачной базе с сохранением прежних данных.
 
 **Два независимых разрешения:** пока

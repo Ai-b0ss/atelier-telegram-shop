@@ -1,0 +1,165 @@
+<?xml version='1.0' encoding='utf-8'?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" id="Definitions_Returns" targetNamespace="https://example.org/atelier">
+  <bpmn:process id="OrderCancellation" name="Отмена заказа и физический возврат" isExecutable="false">
+    <bpmn:startEvent id="start" name="Запрос отмены">
+      <bpmn:outgoing>f1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:task id="check" name="Проверка поступлений и возвратов">
+      <bpmn:incoming>f1</bpmn:incoming>
+      <bpmn:outgoing>f2</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="paid" name="Деньги возвращены?">
+      <bpmn:incoming>f2</bpmn:incoming>
+      <bpmn:outgoing>f3</bpmn:outgoing>
+      <bpmn:outgoing>f4</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:task id="refund" name="Внести полный возврат в учёт">
+      <bpmn:incoming>f4</bpmn:incoming>
+      <bpmn:outgoing>f5</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="cancel" name="Изменить статус на canceled">
+      <bpmn:incoming>f3</bpmn:incoming>
+      <bpmn:outgoing>f6</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="ship" name="Уже отправлен?">
+      <bpmn:incoming>f6</bpmn:incoming>
+      <bpmn:outgoing>f7</bpmn:outgoing>
+      <bpmn:outgoing>f9</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:task id="auto" name="Автоматически восстановить склад">
+      <bpmn:incoming>f7</bpmn:incoming>
+      <bpmn:outgoing>f8</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:task id="await" name="Физический возврат изделия">
+      <bpmn:incoming>f9</bpmn:incoming>
+      <bpmn:outgoing>f10</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:exclusiveGateway id="received" name="Изделие получено?">
+      <bpmn:incoming>f10</bpmn:incoming>
+      <bpmn:outgoing>f11</bpmn:outgoing>
+      <bpmn:outgoing>f12</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:task id="receipt" name="Акт возврата, запас + количество">
+      <bpmn:incoming>f11</bpmn:incoming>
+      <bpmn:outgoing>f13</bpmn:outgoing>
+    </bpmn:task>
+    <bpmn:endEvent id="done" name="Заказ закрыт">
+      <bpmn:incoming>f8</bpmn:incoming>
+      <bpmn:incoming>f13</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="open" name="Ожидание фактического возврата">
+      <bpmn:incoming>f12</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="hold" name="Ожидание ручного денежного возврата">
+      <bpmn:incoming>f5</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="check" />
+    <bpmn:sequenceFlow id="f2" sourceRef="check" targetRef="paid" />
+    <bpmn:sequenceFlow id="f3" sourceRef="paid" targetRef="cancel" name="Да" />
+    <bpmn:sequenceFlow id="f4" sourceRef="paid" targetRef="refund" name="Нет" />
+    <bpmn:sequenceFlow id="f5" sourceRef="refund" targetRef="hold" name="Дождаться проверки" />
+    <bpmn:sequenceFlow id="f6" sourceRef="cancel" targetRef="ship" />
+    <bpmn:sequenceFlow id="f7" sourceRef="ship" targetRef="auto" name="Нет" />
+    <bpmn:sequenceFlow id="f8" sourceRef="auto" targetRef="done" />
+    <bpmn:sequenceFlow id="f9" sourceRef="ship" targetRef="await" name="Да" />
+    <bpmn:sequenceFlow id="f10" sourceRef="await" targetRef="received" />
+    <bpmn:sequenceFlow id="f11" sourceRef="received" targetRef="receipt" name="Да" />
+    <bpmn:sequenceFlow id="f12" sourceRef="received" targetRef="open" name="Нет" />
+    <bpmn:sequenceFlow id="f13" sourceRef="receipt" targetRef="done" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="Diagram_Returns">
+    <bpmndi:BPMNPlane id="Plane_Returns" bpmnElement="OrderCancellation">
+      <bpmndi:BPMNShape id="start_di" bpmnElement="start">
+        <dc:Bounds x="40" y="210" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="check_di" bpmnElement="check">
+        <dc:Bounds x="115" y="190" width="145" height="76" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="paid_di" bpmnElement="paid">
+        <dc:Bounds x="295" y="200" width="55" height="55" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="refund_di" bpmnElement="refund">
+        <dc:Bounds x="285" y="65" width="150" height="76" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="cancel_di" bpmnElement="cancel">
+        <dc:Bounds x="395" y="190" width="150" height="76" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ship_di" bpmnElement="ship">
+        <dc:Bounds x="590" y="200" width="55" height="55" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="auto_di" bpmnElement="auto">
+        <dc:Bounds x="685" y="55" width="160" height="76" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="await_di" bpmnElement="await">
+        <dc:Bounds x="685" y="240" width="160" height="76" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="received_di" bpmnElement="received">
+        <dc:Bounds x="890" y="248" width="55" height="55" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="receipt_di" bpmnElement="receipt">
+        <dc:Bounds x="995" y="160" width="170" height="76" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="done_di" bpmnElement="done">
+        <dc:Bounds x="1205" y="125" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="open_di" bpmnElement="open">
+        <dc:Bounds x="1025" y="338" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="hold_di" bpmnElement="hold">
+        <dc:Bounds x="460" y="60" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="f1_di" bpmnElement="f1">
+        <di:waypoint x="76" y="228.0" />
+        <di:waypoint x="115" y="228.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f2_di" bpmnElement="f2">
+        <di:waypoint x="260" y="228.0" />
+        <di:waypoint x="295" y="227.5" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f3_di" bpmnElement="f3">
+        <di:waypoint x="350" y="227.5" />
+        <di:waypoint x="395" y="228.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f4_di" bpmnElement="f4">
+        <di:waypoint x="350" y="227.5" />
+        <di:waypoint x="285" y="103.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f5_di" bpmnElement="f5">
+        <di:waypoint x="435" y="103.0" />
+        <di:waypoint x="460" y="78.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f6_di" bpmnElement="f6">
+        <di:waypoint x="545" y="228.0" />
+        <di:waypoint x="590" y="227.5" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f7_di" bpmnElement="f7">
+        <di:waypoint x="645" y="227.5" />
+        <di:waypoint x="685" y="93.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f8_di" bpmnElement="f8">
+        <di:waypoint x="845" y="93.0" />
+        <di:waypoint x="1205" y="143.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f9_di" bpmnElement="f9">
+        <di:waypoint x="645" y="227.5" />
+        <di:waypoint x="685" y="278.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f10_di" bpmnElement="f10">
+        <di:waypoint x="845" y="278.0" />
+        <di:waypoint x="890" y="275.5" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f11_di" bpmnElement="f11">
+        <di:waypoint x="945" y="275.5" />
+        <di:waypoint x="995" y="198.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f12_di" bpmnElement="f12">
+        <di:waypoint x="945" y="275.5" />
+        <di:waypoint x="1025" y="356.0" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f13_di" bpmnElement="f13">
+        <di:waypoint x="1165" y="198.0" />
+        <di:waypoint x="1205" y="143.0" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

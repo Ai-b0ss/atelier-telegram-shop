@@ -20,3 +20,6 @@ cloudflare/.wrangler/
 cloudflare/.dev.vars
 cloudflare/.dev.vars.*
 cloudflare/test/test-workbook.xlsx
+
+# Private D1 exports (encrypted for this Windows user)
+backups/

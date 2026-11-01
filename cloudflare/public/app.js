@@ -173,6 +173,10 @@ function openEditor(kind,id=0,selectedProductId=0){
       '<p><b>'+esc(o.contact_name)+'</b> · '+esc(o.contact_phone)+'<br>'+esc(o.delivery_address)+'</p>'+
       (o.kind==="custom"?'<p><b>Пожелания:</b> '+esc(o.custom_details)+'</p><p><b>Мерки:</b> '+esc(o.custom_measurements)+'</p>':'')+
       '<p>Текущий статус: '+esc(labels[o.status])+'</p>'+
+      (o.kind==="catalog"&&o.status==="canceled"&&Number(o.shipping_event_count)>0?
+       '<p class="small">После отправки заказ не возвращается на склад автоматически.</p>'+
+       (Number(o.return_receipt_count)>0?'<p class="success">Возврат изделия уже учтён.</p>':
+        '<div class="return-form"><label>Примечание о приёмке<input name="returnNote" maxlength="300" placeholder="Где и кем получен товар"></label><label class="return-check"><input type="checkbox" name="returnConfirm"> Подтверждаю фактическое получение возвращённого изделия</label><button class="quiet" type="button" data-inventory-return="'+o.id+'">Учесть возврат на склад</button></div>'):"")+
       '<label>Новый статус<select name="status"><option value="">Без изменения</option>'+(next[o.status]||[]).map(st=>'<option value="'+st+'">'+esc(labels[st])+'</option>').join("")+'</select></label>'+
       (o.kind==="custom"&&o.status==="new"?'<label>Предложить цену, ₽<input type="number" min="1" name="quoteRub" placeholder="Например, 8000"></label><label>Себестоимость, ₽<input type="number" min="0" name="costRub" placeholder="Например, 3400"></label>':'');
   }
@@ -280,6 +284,22 @@ async function init(){
       const payload=Object.fromEntries(fd);
       const result=await api("/api/admin/settings","POST",payload);
       toast(result.readyForReview?"Реквизиты сохранены для проверки":"Настройки сохранены. Продажи ещё не включены.");
+      await loadAdmin();
+    });
+  });
+  $("editor-fields").addEventListener("click",e=>{
+    const button=e.target.closest("[data-inventory-return]");
+    if(!button)return;
+    const id=Number(button.dataset.inventoryReturn);
+    const note=$("editor-fields").querySelector('input[name="returnNote"]')?.value?.trim()||"";
+    const confirmed=$("editor-fields").querySelector('input[name="returnConfirm"]')?.checked===true;
+    if(note.length<4||!confirmed){toast("Укажите приёмку и подтвердите физический возврат",true);return}
+    button.disabled=true;
+    safeRun(async()=>{
+      try{await api("/api/admin/order/return","POST",{id,physicallyReceived:true,note})}
+      finally{button.disabled=false}
+      $("editor").close();
+      toast("Фактический возврат учтён, склад обновлён");
       await loadAdmin();
     });
   });

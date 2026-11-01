@@ -49,7 +49,7 @@ def verify_tracked_files() -> None:
 
 
 def main() -> None:
-    for name in ("catalog-sales.bpmn", "custom-tailoring.bpmn"):
+    for name in ("catalog-sales.bpmn", "custom-tailoring.bpmn", "order-cancellation.bpmn"):
         verify_bpmn(ROOT / "docs" / name)
     verify_tracked_files()
     print("Release checks: BPMN structure and tracked source files OK")

@@ -30,7 +30,7 @@
       <ns0:incoming>c7</ns0:incoming>
       <ns0:outgoing>c8</ns0:outgoing>
     </ns0:task>
-    <ns0:task id="confirmation" name="Подтверждение менеджером">
+    <ns0:task id="confirmation" name="Покупатель пишет менеджеру, заказ подтверждён">
       <ns0:incoming>c6</ns0:incoming>
       <ns0:outgoing>c9</ns0:outgoing>
     </ns0:task>

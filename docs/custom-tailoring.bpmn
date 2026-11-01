@@ -8,7 +8,7 @@
       <ns0:incoming>t1</ns0:incoming>
       <ns0:outgoing>t2</ns0:outgoing>
     </ns0:task>
-    <ns0:task id="quote" name="Расчёт цены и себестоимости">
+    <ns0:task id="quote" name="Обсуждение с менеджером, расчёт цены">
       <ns0:incoming>t2</ns0:incoming>
       <ns0:outgoing>t3</ns0:outgoing>
     </ns0:task>
@@ -32,7 +32,7 @@
       <ns0:incoming>t7</ns0:incoming>
       <ns0:outgoing>t8</ns0:outgoing>
     </ns0:task>
-    <ns0:task id="handoff" name="Передача изделия">
+    <ns0:task id="handoff" name="Самовывоз у м. Беляево">
       <ns0:incoming>t8</ns0:incoming>
       <ns0:outgoing>t9</ns0:outgoing>
     </ns0:task>

@@ -54,21 +54,38 @@ export async function handleApi(request,env,url){
 
   if(request.method==="GET"&&path==="/api/cart"){
     const c=await getCustomer(env.DB,u);
-    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.name FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
+    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.name,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
     return json({ok:true,items,total_cents:items.reduce((n,x)=>n+x.quantity*x.price_cents,0)});
   }
   if(request.method==="POST"&&path==="/api/cart"){
     const b=await safeBody(request),variantId=integer(b.variantId),delta=integer(Math.abs(b.delta),1,20);
     if(!variantId||!delta||![1,-1].includes(b.delta))return err("Invalid cart item");
     const c=await getCustomer(env.DB,u);
+    // Never do read-modify-write with stale quantity: two concurrent requests
+    // otherwise both return 200 but only one increment is recorded.
+    // Each decrement uses conditional SQL updates; removed/archive items
+    // remain removable, regardless of their current availability.
+    if(b.delta===-1){
+      const changed=await run(env.DB,
+        "UPDATE cart_items SET quantity=quantity-1 WHERE customer_id=? AND variant_id=? AND quantity>1",
+        c.id,variantId);
+      if(changed.meta.changes===0)await run(env.DB,
+        "DELETE FROM cart_items WHERE customer_id=? AND variant_id=? AND quantity=1",c.id,variantId);
+      const remaining=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+      return json({ok:true,quantity:remaining?.quantity||0});
+    }
     const v=await first(env.DB,"SELECT v.stock,v.active,p.active AS product_active FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?",variantId);
     if(!v||!v.active||!v.product_active)return err("Unavailable variant",404);
-    const current=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
-    const q=(current?.quantity||0)+b.delta;
-    if(q>v.stock)return err("Insufficient stock",409);
-    if(q<=0)await run(env.DB,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
-    else await run(env.DB,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,?) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=excluded.quantity",c.id,variantId,q);
-    return json({ok:true,quantity:Math.max(0,q)});
+    const added=await run(env.DB,
+      "INSERT INTO cart_items(customer_id,variant_id,quantity) "+
+      "SELECT ?,v.id,1 FROM variants v JOIN products p ON p.id=v.product_id "+
+      "WHERE v.id=? AND v.active=1 AND p.active=1 AND v.stock>0 "+
+      "ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=cart_items.quantity+1 "+
+      "WHERE cart_items.quantity < (SELECT stock FROM variants WHERE id=excluded.variant_id)",
+      c.id,variantId);
+    if(added.meta.changes!==1)return err("Insufficient stock or product unavailable",409);
+    const updated=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+    return json({ok:true,quantity:updated?.quantity||0});
   }
   if(request.method==="POST"&&path==="/api/checkout"){
     const b=await safeBody(request),requestKey=text(b.requestKey,64);
@@ -78,8 +95,12 @@ export async function handleApi(request,env,url){
     const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
     if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
     const c=await getCustomer(env.DB,u);
+    const cartLines=await first(env.DB,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
     const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
-    if(!items.length||items.some(x=>x.stock<x.quantity))return err("Cart empty or stock changed",409);
+    // Never silently omit an archived product: all cart lines must be
+    // available before creating an order for any of them.
+    if(!items.length||items.length!==Number(cartLines?.n||0)||items.some(x=>x.stock<x.quantity))
+      return err("Cart has unavailable items or stock changed. Review the cart.",409);
     const total=items.reduce((n,x)=>n+x.price_cents*x.quantity,0);
     const cost=items.reduce((n,x)=>n+x.cost_cents*x.quantity,0);
     const result=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,name,phone,address);
@@ -88,18 +109,36 @@ export async function handleApi(request,env,url){
       await env.DB.batch([
         dbStatement(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,orderId),
         ...items.map(x=>dbStatement(env.DB,
-          "UPDATE variants SET stock=CASE WHEN active=1 AND EXISTS(SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1) THEN stock-? ELSE -1 END WHERE id=?",
-          x.quantity,x.variant_id)),
+          // Force a CHECK failure (and rollback this entire D1 batch) when
+          // another request changes any cart line, or the seller changes
+          // the price, cost or availability after we read the snapshot.
+          "UPDATE variants SET stock=CASE WHEN active=1 AND price_cents=? AND cost_cents=? "+
+          "AND EXISTS(SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1) "+
+          "AND EXISTS(SELECT 1 FROM cart_items ci WHERE ci.customer_id=? AND ci.variant_id=variants.id AND ci.quantity=?) "+
+          "AND (SELECT COUNT(*) FROM cart_items WHERE customer_id=?)=? "+
+          "THEN stock-? ELSE -1 END WHERE id=?",
+          x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
         ...items.map(x=>dbStatement(env.DB,"INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)",
           orderId,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
         dbStatement(env.DB,"DELETE FROM cart_items WHERE customer_id=?",c.id),
         dbStatement(env.DB,"INSERT INTO status_history(order_id,new_status) VALUES(?,'new')",orderId)
       ]);
     }catch{
-      await run(env.DB,"UPDATE orders SET status='canceled' WHERE id=? AND status='new'",orderId);
+      // The order header was inserted before the atomic batch. A failed
+      // inventory transaction must not retain a phantom order with PII.
+      // Never delete a successfully committed order (items/request key exist).
+      const removed=await run(env.DB,
+        "DELETE FROM orders WHERE id=? AND status='new' "+
+        "AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?) "+
+        "AND NOT EXISTS(SELECT 1 FROM checkout_requests WHERE order_id=?)",
+        orderId,orderId,orderId);
+      if(removed.meta.changes===0)await run(env.DB,
+        "UPDATE orders SET contact_name='',contact_phone='',delivery_address='' "+
+        "WHERE id=? AND status='new' AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?) "+
+        "AND NOT EXISTS(SELECT 1 FROM checkout_requests WHERE order_id=?)",orderId,orderId,orderId);
       const found=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
       if(found)return json({ok:true,orderId:found.order_id,duplicate:true});
-      return err("Stock changed during checkout. Your cart is preserved.",409);
+      return err("Stock or cart changed during checkout. Your cart is preserved.",409);
     }
     try{await telegramSend(env,u.id,"Демо-заказ №"+orderId+" оформлен. Оплата не проводилась.");}catch{}
     for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
@@ -139,15 +178,29 @@ export async function handleApi(request,env,url){
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
     const settings=await first(env.DB,"SELECT * FROM store_settings WHERE id=1");
     const orders=await rows(env.DB,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at,o.custom_details,o.custom_measurements,(SELECT COUNT(*) FROM custom_attachments a WHERE a.order_id=o.id) AS attachment_count,(SELECT COUNT(*) FROM inventory_return_receipts r WHERE r.order_id=o.id) AS return_receipt_count,(SELECT COUNT(*) FROM status_history h WHERE h.order_id=o.id AND h.new_status='shipped') AS shipping_event_count,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC LIMIT 100");
-    const payments=await rows(env.DB,"SELECT kind,amount_cents FROM payments ORDER BY id DESC LIMIT 1000");
-    const net=payments.reduce((v,p)=>v+(p.kind==="received"?p.amount_cents:-p.amount_cents),0);
-    const completed=orders.filter(o=>o.status==="completed");
+    // Lists are deliberately bounded for mobile performance. Metrics are NOT:
+    // calculating totals from the latest 100 orders/1000 payments understates
+    // lifetime figures as soon as the shop has more history.
+    const totals=await first(env.DB,
+      "SELECT COUNT(*) AS order_count, "+
+      "COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed_count, "+
+      "COALESCE(SUM(CASE WHEN status!='canceled' THEN total_cents ELSE 0 END),0) AS booked_revenue_cents, "+
+      "COALESCE(SUM(CASE WHEN status='completed' THEN total_cents-cost_cents ELSE 0 END),0) AS gross_margin_cents "+
+      "FROM orders");
+    const counts=await rows(env.DB,"SELECT status,COUNT(*) AS n FROM orders GROUP BY status");
+    const payments=await first(env.DB,
+      "SELECT COALESCE(SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END),0) AS net_cents FROM payments");
+    const lowStock=await first(env.DB,"SELECT COUNT(*) AS n FROM variants WHERE stock<=3 AND active=1");
+    const statuses=["new","confirmed","in_production","ready","shipped","completed","canceled"];
     const metrics={
-      orderCount:orders.length,completedCount:completed.length,
-      bookedRevenueCents:orders.filter(o=>o.status!=="canceled").reduce((v,o)=>v+o.total_cents,0),
-      grossMarginCents:completed.reduce((v,o)=>v+o.total_cents-o.cost_cents,0),
-      paidNetCents:net,lowStockCount:variants.filter(v=>v.stock<=3&&v.active).length,
-      ordersByStatus:Object.fromEntries(["new","confirmed","in_production","ready","shipped","completed","canceled"].map(status=>[status,orders.filter(o=>o.status===status).length]))
+      orderCount:Number(totals?.order_count||0),
+      completedCount:Number(totals?.completed_count||0),
+      bookedRevenueCents:Number(totals?.booked_revenue_cents||0),
+      grossMarginCents:Number(totals?.gross_margin_cents||0),
+      paidNetCents:Number(payments?.net_cents||0),
+      lowStockCount:Number(lowStock?.n||0),
+      ordersByStatus:Object.fromEntries(statuses.map(status=>
+        [status,Number(counts.find(x=>x.status===status)?.n||0)]))
     };
     return json({ok:true,metrics,orders,products,variants,categories,settings,demo:demoMode(env)});
   }

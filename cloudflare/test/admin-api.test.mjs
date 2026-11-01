@@ -311,6 +311,8 @@ test("checkout rejects a cart changed between snapshot and atomic commit",async(
     assert.equal(inserted,true);
     assert.equal(response.status,409,"changed cart must be retried rather than silently truncated");
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,0);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0,
+      "failed checkout must not retain a phantom order with contact data");
     assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
     assert.equal(raw.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
   }finally{globalThis.fetch=originalFetch;raw.close()}

@@ -76,8 +76,13 @@ export function makeHandler(env) {
   }
   async function checkout(id,u,data,addr) {
     const c=await customer(u);
+    const cartLines=await first(db,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
     const items=await rows(db,"SELECT ci.quantity,ci.variant_id,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
-    if(!items.length)return send(id,"Корзина пуста или товар больше недоступен.");
+    if(!items.length&&Number(cartLines?.n||0)===0)return send(id,"Корзина пуста.");
+    // The user must explicitly remove archived products, rather than having
+    // the bot silently submit only the other items in the same cart.
+    if(items.length!==Number(cartLines?.n||0))
+      return send(id,"Некоторые изделия в корзине больше недоступны. Удалите их в корзине и повторите оформление.");
     if(items.some(x=>x.stock<x.quantity))return send(id,"Недостаточно изделий на складе — проверьте корзину.");
     const total=items.reduce((v,x)=>v+x.quantity*x.price_cents,0),cost=items.reduce((v,x)=>v+x.quantity*x.cost_cents,0);
     const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,data.name,data.phone,addr);

@@ -24,20 +24,19 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 @keyframes bump{40%{transform:scale(1.5);background:var(--accent)}}
 
 /* Hero */
-.hero{display:block;background:var(--ink);color:var(--paper);border-radius:var(--radius);min-height:0;margin:4px 0 0;overflow:hidden;position:relative}
-.hero-body{padding:30px 22px 26px;position:relative;z-index:1}
+.hero{display:block;background:transparent;color:var(--ink);border-radius:0;min-height:0;margin:4px 0 0;overflow:hidden;position:relative}
+.hero-body{padding:22px 0 26px;position:relative;z-index:1}
 .eyebrow{font-size:11px;font-weight:500;letter-spacing:.08em;color:var(--accent)}
-.hero .eyebrow{color:#e2775a}
+.hero .eyebrow{color:var(--accent)}
 .hero h1{font:600 clamp(40px,12vw,104px)/.98 Geologica,system-ui,sans-serif;letter-spacing:-.045em;margin:16px 0 18px}
 .hero h1 span{display:block;overflow:hidden}
 .hero h1 span>i{display:block;font-style:normal;animation:rise .9s var(--ease) both}
 .hero h1 span:nth-child(2)>i{animation-delay:.09s}
 @keyframes rise{from{transform:translateY(105%)}to{transform:none}}
-.hero p{color:#bdb9ae;font-size:15px;line-height:1.5;max-width:420px;margin:0 0 22px;animation:fade .7s .3s var(--ease) both}
+.hero p{color:var(--muted);font-size:15px;line-height:1.5;max-width:420px;margin:0 0 22px;animation:fade .7s .3s var(--ease) both}
 @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-.hero .primary{background:var(--paper);border-color:var(--paper);color:var(--ink);font-size:15px;min-height:52px;padding:14px 24px;animation:fade .7s .4s var(--ease) both}
-.hero .primary:hover{background:#fff}
-.ticker{border-top:1px solid #ffffff24;overflow:hidden;white-space:nowrap;padding:11px 0;font-size:12px;color:#bdb9ae}
+.hero .primary{font-size:15px;min-height:52px;padding:14px 24px;animation:fade .7s .4s var(--ease) both}
+.ticker{border-top:1px solid var(--line);border-bottom:1px solid var(--line);overflow:hidden;white-space:nowrap;padding:11px 0;font-size:12px;color:var(--muted)}
 .ticker div{display:inline-block;animation:ticker 28s linear infinite}
 .ticker span{padding-right:28px}
 @keyframes ticker{to{transform:translateX(-50%)}}
@@ -136,13 +135,13 @@ dialog.sheet.closing::backdrop{opacity:0;transition:opacity .22s}
 .form-footnote,.small{font-size:13px;line-height:1.5}
 
 .tailor-layout{grid-template-columns:1fr;gap:12px}
-.tailor-intro{min-height:0;background:var(--ink);color:var(--paper);padding:22px;border-radius:var(--radius)}
+.tailor-intro{min-height:0;background:transparent;color:var(--ink);padding:4px 0 8px;border-radius:0}
 .tailor-intro:after{display:none}
-.tailor-intro h3{font-size:28px;margin:0 0 10px}
-.tailor-intro p{color:#bdb9ae;font-size:15px;line-height:1.5;max-width:none}
-.tailor-steps{list-style:none;padding:0;margin:16px 0 0;font-size:14px;color:#bdb9ae;counter-reset:s}
-.tailor-steps li{counter-increment:s;padding:9px 0;border-top:1px solid #ffffff24}
-.tailor-steps li:before{content:counter(s);color:#e2775a;margin-right:10px}
+.tailor-intro h3{font-size:19px;font-weight:500;margin:0 0 8px}
+.tailor-intro p{color:var(--muted);font-size:15px;line-height:1.5;max-width:none}
+.tailor-steps{list-style:none;padding:0;margin:16px 0 0;font-size:14px;color:var(--ink);counter-reset:s}
+.tailor-steps li{counter-increment:s;padding:9px 0;border-top:1px solid var(--line)}
+.tailor-steps li:before{content:counter(s);color:var(--accent);margin-right:10px}
 .tailor-layout .form-card{min-height:0;margin:0}
 
 .pickup{border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:15px 0;font-size:14px;line-height:1.45}
@@ -173,7 +172,7 @@ footer{font-size:12px;font-weight:400;margin-top:36px;flex-wrap:wrap;border-colo
 @media(min-width:760px){
   .shell{padding:0 28px}
   .topbar{margin:0 -28px;padding:0 28px;height:68px}
-  .hero-body{padding:56px 44px 46px}
+  .hero-body{padding:44px 0 40px}
   .product-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:30px 14px}
   .tailor-layout{grid-template-columns:.8fr 1.2fr}
   dialog.sheet{inset:0;margin:auto;height:fit-content;border-radius:22px}

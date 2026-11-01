@@ -284,3 +284,34 @@ test("cart reflects stock shortage and recovers after reducing quantity",async()
     assert.equal(cart.items[0].available,1,"reducing quantity must unblock checkout");
   }finally{db.close()}
 });
+
+
+test("checkout rejects a cart changed between snapshot and atomic commit",async()=>{
+  const db=localDB(),raw=db.raw;
+  const env={DB:db,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    let inserted=false;
+    const underlying=db.batch.bind(db);
+    db.batch=async statements=>{
+      if(!inserted){
+        inserted=true;
+        // Another action on the same account adds a second product while the
+        // first checkout is waiting to commit. It must NOT disappear for free.
+        raw.prepare("INSERT INTO cart_items(customer_id,variant_id,quantity) SELECT id,2,1 FROM customers WHERE telegram_id=777").run();
+      }
+      return underlying(statements);
+    };
+    const response=await call(env,"/api/checkout","POST",{
+      requestKey:"cart_snapshot_race_012345678",
+      name:"Synthetic Buyer",phone:"@test",address:"Test pickup"
+    });
+    assert.equal(inserted,true);
+    assert.equal(response.status,409,"changed cart must be retried rather than silently truncated");
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,0);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(raw.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+  }finally{globalThis.fetch=originalFetch;raw.close()}
+});

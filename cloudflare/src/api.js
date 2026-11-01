@@ -54,7 +54,7 @@ export async function handleApi(request,env,url){
 
   if(request.method==="GET"&&path==="/api/cart"){
     const c=await getCustomer(env.DB,u);
-    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.name FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
+    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.name,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
     return json({ok:true,items,total_cents:items.reduce((n,x)=>n+x.quantity*x.price_cents,0)});
   }
   if(request.method==="POST"&&path==="/api/cart"){

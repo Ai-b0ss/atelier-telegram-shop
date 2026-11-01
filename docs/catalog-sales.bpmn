@@ -13,7 +13,7 @@
       <ns0:incoming>c2</ns0:incoming>
       <ns0:outgoing>c3</ns0:outgoing>
     </ns0:task>
-    <ns0:task id="contact" name="Контакты и доставка">
+    <ns0:task id="contact" name="Контакты и самовывоз">
       <ns0:incoming>c3</ns0:incoming>
       <ns0:outgoing>c4</ns0:outgoing>
     </ns0:task>
@@ -38,7 +38,7 @@
       <ns0:incoming>c9</ns0:incoming>
       <ns0:outgoing>c10</ns0:outgoing>
     </ns0:task>
-    <ns0:task id="delivery" name="Выдача/доставка">
+    <ns0:task id="delivery" name="Самовывоз у м. Беляево">
       <ns0:incoming>c10</ns0:incoming>
       <ns0:outgoing>c11</ns0:outgoing>
     </ns0:task>

@@ -245,3 +245,23 @@ test("cart can discard an archived variant but cannot add it again",async()=>{
       "an archived variant must never be purchasable again");
   }finally{db.close()}
 });
+
+
+test("Mini App rejects partial checkout if any item became inactive",async()=>{
+  const storage=localDB(), db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:2,delta:1})).status,200);
+    db.exec("UPDATE variants SET active=0 WHERE id=2");
+    const response=await call(env,"/api/checkout","POST",{
+      requestKey:"partial_order_guard_0123456789",
+      name:"Test Buyer",phone:"@example",address:"Демо-самовывоз"
+    });
+    assert.equal(response.status,409,"one archived item must reject whole checkout");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=2").get().stock,8);
+  }finally{db.close()}
+});

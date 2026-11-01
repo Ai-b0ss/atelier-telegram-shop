@@ -85,11 +85,15 @@ async function loadCart(){
     $("cart-body").innerHTML='<div class="empty">Пока пусто. Выберите изделие в каталоге.</div>';
     $("checkout-form").hidden=true;return;
   }
-  $("cart-body").innerHTML=state.cart.items.map(x=>'<div class="cart-row"><div><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small></div><div class="qty-buttons">'+
+  const hasUnavailable=state.cart.items.some(x=>Number(x.available)===0);
+  $("cart-body").innerHTML=(hasUnavailable?'<div class="notice" role="alert">Некоторые изделия недоступны или их осталось меньше, чем в корзине. Уменьшите количество или удалите эти позиции перед оформлением.</div>':"")+
+    state.cart.items.map(x=>'<div class="cart-row"><div><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small>'+
+    (Number(x.available)===0?'<small class="error">Временно недоступно — уменьшите количество или удалите</small>':"")+
+    '</div><div class="qty-buttons">'+
     '<button data-qty="'+x.variant_id+'" data-delta="-1" aria-label="Уменьшить">−</button><span>'+x.quantity+'</span>'+
     '<button data-qty="'+x.variant_id+'" data-delta="1" aria-label="Добавить">+</button></div></div>').join("")+
     '<div class="cart-total"><span>Итого</span><span>'+money(state.cart.total_cents)+'</span></div>';
-  $("checkout-form").hidden=false;
+  $("checkout-form").hidden=hasUnavailable;
 }
 async function loadAdmin(){
   state.dashboard=await api("/api/admin/dashboard");

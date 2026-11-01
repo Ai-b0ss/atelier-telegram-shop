@@ -11,7 +11,7 @@
  * Only status markers are printed, never SQL or customer data.
  */
 import {randomBytes,scryptSync,createCipheriv,createDecipheriv,createHash} from "node:crypto";
-import {existsSync,mkdirSync,readFileSync,writeFileSync,rmSync,mkdtempSync} from "node:fs";
+import {mkdirSync,readFileSync,writeFileSync,rmSync,mkdtempSync} from "node:fs";
 import {spawnSync} from "node:child_process";
 import {homedir,tmpdir} from "node:os";
 import path from "node:path";
@@ -45,10 +45,13 @@ export function decryptBackup(archive,passphrase){
 function passphrase(){
   if(process.env.ATELIER_BACKUP_PASSPHRASE)return process.env.ATELIER_BACKUP_PASSPHRASE;
   const dir=path.join(homedir(),".atelier-secrets"),file=path.join(dir,"backup-passphrase.txt");
-  if(!existsSync(file)){
-    mkdirSync(dir,{recursive:true});
-    writeFileSync(file,randomBytes(32).toString("base64url")+"\n",{mode:0o600});
+  mkdirSync(dir,{recursive:true});
+  // "wx" fails if the file exists, so a concurrent run can never replace a key already in use.
+  try{
+    writeFileSync(file,randomBytes(32).toString("base64url")+"\n",{mode:0o600,flag:"wx"});
     console.log("PASSPHRASE_CREATED="+file);
+  }catch(error){
+    if(error.code!=="EEXIST")throw error;
   }
   return readFileSync(file,"utf8").trim();
 }

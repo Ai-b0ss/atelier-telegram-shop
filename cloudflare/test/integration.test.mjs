@@ -484,3 +484,44 @@ test("Excel summary reports complete history when order and payment tabs are cap
     assert.match(raw,/Чистые поступления \(коп\.\)<\/t><\/is><\/c><c r="B3" t="n"><v>10050<\/v>/);
   }finally{globalThis.fetch=originalFetch;db.close()}
 });
+
+
+test("Telegram checkout preserves cart additions made before its stock transaction",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test')");
+  db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,1,1)");
+  const originalBatch=storage.batch.bind(storage);
+  let raced=false;
+  storage.batch=async commands=>{
+    if(!raced){
+      raced=true;
+      db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,2,1)");
+    }
+    return originalBatch(commands);
+  };
+  const originalFetch=globalThis.fetch;
+  const sent=[];
+  globalThis.fetch=async(url,opts)=>{
+    sent.push({url:String(url),body:JSON.parse(opts.body)});
+    return Response.json({ok:true,result:true});
+  };
+  const dispatch=async update=>{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(update)
+    });
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    assert.equal((await dispatch(makeCallback(88001,"checkout"))).status,200);
+    for(const [i,text] of ["Synthetic Client","@synthetic","Самовывоз"].entries())
+      assert.equal((await dispatch(makeUpdate(88002+i,{text}))).status,200);
+    assert.equal(raced,true);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,0);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    assert(sent.some(x=>x.body?.text?.includes("Склад изменился")),
+      "buyer must be warned of an interrupted checkout");
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});

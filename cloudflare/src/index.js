@@ -76,8 +76,13 @@ export function makeHandler(env) {
   }
   async function checkout(id,u,data,addr) {
     const c=await customer(u);
+    const cartLines=await first(db,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
     const items=await rows(db,"SELECT ci.quantity,ci.variant_id,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
-    if(!items.length)return send(id,"Корзина пуста или товар больше недоступен.");
+    if(!items.length&&Number(cartLines?.n||0)===0)return send(id,"Корзина пуста.");
+    // The user must explicitly remove archived products, rather than having
+    // the bot silently submit only the other items in the same cart.
+    if(items.length!==Number(cartLines?.n||0))
+      return send(id,"Некоторые изделия в корзине больше недоступны. Удалите их в корзине и повторите оформление.");
     if(items.some(x=>x.stock<x.quantity))return send(id,"Недостаточно изделий на складе — проверьте корзину.");
     const total=items.reduce((v,x)=>v+x.quantity*x.price_cents,0),cost=items.reduce((v,x)=>v+x.quantity*x.cost_cents,0);
     const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,data.name,data.phone,addr);
@@ -89,10 +94,12 @@ export function makeHandler(env) {
     // conditional WHERE stock>=?, it fails the transaction on a sold-out SKU.
     const statements=[
       ...items.map(x=>db.prepare(
-        "UPDATE variants SET stock=CASE WHEN active=1 AND EXISTS("+
+        "UPDATE variants SET stock=CASE WHEN active=1 AND price_cents=? AND cost_cents=? AND EXISTS("+
         "SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1"+
-        ") THEN stock-? ELSE -1 END WHERE id=?"
-      ).bind(x.quantity,x.variant_id)),
+        ") AND EXISTS(SELECT 1 FROM cart_items ci WHERE ci.customer_id=? AND ci.variant_id=variants.id AND ci.quantity=?)"+
+        " AND (SELECT COUNT(*) FROM cart_items WHERE customer_id=?)=?"+
+        " THEN stock-? ELSE -1 END WHERE id=?"
+      ).bind(x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
       ...items.map(x=>db.prepare(
         "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)"
       ).bind(oid,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
@@ -103,9 +110,15 @@ export function makeHandler(env) {
       await db.batch(statements);
     } catch (error) {
       // No partial inventory change can commit on a failed D1 batch.
-      // Keep the cart so the buyer can retry with updated availability.
-      await run(db,"UPDATE orders SET status='canceled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='new'",oid);
-      await send(id,"Склад изменился. Заказ отменён, позиции в корзине сохранены.");
+      // Remove the uncommitted order header; its contact data must not be
+      // retained for an order that never actually existed.
+      const cleanup=await run(db,
+        "DELETE FROM orders WHERE id=? AND status='new' "+
+        "AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?)",oid,oid);
+      if(cleanup.meta.changes===0)await run(db,
+        "UPDATE orders SET contact_name='',contact_phone='',delivery_address='' "+
+        "WHERE id=? AND status='new' AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?)",oid,oid);
+      await send(id,"Склад или корзина изменились. Заказ не оформлен, позиции в корзине сохранены.");
       return;
     }
     await send(id,"Тестовый заказ №"+oid+" создан. Оплата не проводилась.");
@@ -181,14 +194,31 @@ export function makeHandler(env) {
     const orders=await rows(db,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at FROM orders o ORDER BY o.id DESC LIMIT 1000");
     const stocks=await rows(db,"SELECT p.name,v.sku,v.size,v.color,v.price_cents,v.cost_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id ORDER BY p.name,v.sku");
     const payments=await rows(db,"SELECT id,order_id,kind,amount_cents,reference,created_at FROM payments ORDER BY id DESC LIMIT 1000");
-    const totals={orders:orders.length,net:payments.reduce((v,x)=>v+(x.kind==="received"?x.amount_cents:-x.amount_cents),0)};
+    // Detailed sheets show only the most recent 1000 rows. The summary
+    // MUST represent the entire ledger, not the limited export slices.
+    const orderStats=await first(db,"SELECT COUNT(*) AS n FROM orders");
+    const paymentStats=await first(db,
+      "SELECT COUNT(*) AS n,COALESCE(SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END),0) AS net FROM payments");
+    const totals={orders:Number(orderStats?.n||0),net:Number(paymentStats?.net||0),payments:Number(paymentStats?.n||0)};
+    const partial=totals.orders>orders.length||totals.payments>payments.length;
     const data=makeXlsx([
       ["Заказы",["ID","Вид","Статус","Цена коп.","Себестоимость коп.","Имя","Контакт","Доставка","Дата"],orders.map(x=>[x.id,x.kind,x.status,x.total_cents,x.cost_cents,x.contact_name,x.contact_phone,x.delivery_address,x.created_at])],
       ["Остатки",["Изделие","SKU","Размер","Цвет","Цена коп.","Себестоимость коп.","Остаток"],stocks.map(x=>[x.name,x.sku,x.size,x.color,x.price_cents,x.cost_cents,x.stock])],
       ["Оплаты",["ID","Заказ","Тип","Сумма коп.","Номер","Дата"],payments.map(x=>[x.id,x.order_id,x.kind,x.amount_cents,x.reference,x.created_at])],
-      ["Итоги",["Показатель","Значение"],[["Количество заказов",totals.orders],["Чистые поступления (коп.)",totals.net],["Режим",demo(env)?"Демо":"Боевой"]]]
+      ["Итоги",["Показатель","Значение"],[
+        ["Количество заказов",totals.orders],
+        ["Чистые поступления (коп.)",totals.net],
+        ["Выведено заказов в XLSX",orders.length],
+        ["Всего учётных операций",totals.payments],
+        ["Выведено учётных операций в XLSX",payments.length],
+        ["Списки деталей неполные",partial?"Да — показаны только последние 1000 записей":"Нет"],
+        ["Режим",demo(env)?"Демо":"Боевой"]
+      ]]
     ]);
-    const body=new FormData();body.append("chat_id",String(id));body.append("caption","Демо-отчёт. Платежи — ручной учёт, не операции банка.");
+    const body=new FormData();body.append("chat_id",String(id));
+    body.append("caption",partial?
+      "Демо-отчёт: сводные показатели за всё время, детализация только по последним 1000 строкам. Платежи — ручной учёт.":
+      "Демо-отчёт. Платежи — ручной учёт, не операции банка.");
     body.append("document",new Blob([data],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"atelier-cloud-report.xlsx");
     const response=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/sendDocument",{method:"POST",body});
     if(!response.ok)throw new Error("Excel delivery failed: "+response.status);
@@ -246,11 +276,17 @@ export function makeHandler(env) {
       const o=await first(db,"SELECT * FROM orders WHERE id=?",oid);
       if(!o)return send(id,"Заказ не найден.");
       if(kind==="received"&&o.status==="canceled")return send(id,"Нельзя записать поступление за отменённый заказ.");
-      const existing=await rows(db,"SELECT kind,amount_cents FROM payments WHERE order_id=?",oid);
-      const net=existing.reduce((a,x)=>a+(x.kind==="received"?x.amount_cents:-x.amount_cents),0);
-      if(kind==="refunded"&&amount>net)return send(id,"Возврат превышает поступления.");
-      try{const ins=await run(db,"INSERT INTO payments(order_id,kind,amount_cents,reference) VALUES(?,?,?,?)",oid,kind,amount,ref);
-        return send(id,"Учётная операция №"+ins.meta.last_row_id+": "+rub(amount)+". Реальные деньги не переводились.")
+      // Pre-reading the ledger is unsafe: two simultaneous refunds can both
+      // pass and exceed the received amount. Check its net balance atomically
+      // inside the INSERT statement, and forbid late receipts on cancellations.
+      try{
+        const ins=await run(db,
+          "INSERT INTO payments(order_id,kind,amount_cents,reference) "+
+          "SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM orders WHERE id=? AND (status!='canceled' OR ?!='received')) "+
+          "AND (?!='refunded' OR ?<=COALESCE((SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) FROM payments WHERE order_id=?),0))",
+          oid,kind,amount,ref,oid,kind,kind,amount,oid);
+        if(ins.meta.changes!==1)return send(id,"Операция не записана: возврат превышает поступления или статус заказа изменился.");
+        return send(id,"Учётная операция №"+ins.meta.last_row_id+": "+rub(amount)+". Реальные деньги не переводились.");
       }catch{return send(id,"Не удалось записать операцию: проверьте уникальность номера.")}
     }
     if(cmd==="/stats"){
@@ -360,12 +396,19 @@ export function makeHandler(env) {
       const c=await customer(u);
       const open=await first(db,"SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status NOT IN ('completed','canceled')",c.id);
       if(open.n>0)return send(id,"У вас есть незавершённые заказы. Свяжитесь с менеджером для удаления.");
+      // Customer identity is their positive Telegram ID. Blank names alone
+      // are not anonymization while orders still link to that ID. Retain the
+      // internal accounting customer row, but pseudonymize its external key
+      // with a unique negative internal ID (legitimate Telegram IDs > 0).
       await db.batch([
         db.prepare("DELETE FROM custom_attachments WHERE order_id IN (SELECT id FROM orders WHERE customer_id=?)").bind(c.id),
         db.prepare("UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?").bind(c.id),
-        db.prepare("UPDATE customers SET full_name='',username='' WHERE id=?").bind(c.id)
+        db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
+        db.prepare("DELETE FROM checkout_requests WHERE telegram_id=?").bind(id),
+        db.prepare("DELETE FROM sessions WHERE telegram_id=?").bind(id),
+        db.prepare("UPDATE customers SET telegram_id=-id,full_name='',username='' WHERE id=?").bind(c.id)
       ]);
-      return send(id,"Контакты и мерки в закрытых заказах обезличены.");
+      return send(id,"Контакты, мерки и связь закрытых заказов с вашим Telegram ID удалены. Учётные записи операций сохраняются без ваших контактных данных.");
     }
     if(cmd.startsWith("/")&&["/admin","/orders","/order","/status","/quote","/payment","/report","/stats"].includes(cmd))
       return admins.has(u.id)?adminCommand(id,u,txt):send(id,"Доступ запрещён.");
@@ -426,8 +469,23 @@ async function productImage(id,env){
 export default {
   async fetch(request, env, context) {
     const url=new URL(request.url);
-    if(request.method==="GET"&&url.pathname==="/health")
-      return Response.json({ok:true,bot:"atelier",mode:demo(env)?"demo":"production",database:!!env.DB});
+    if(request.method==="GET"&&url.pathname==="/health"){
+      // A bound D1 object does not prove D1 is available. Perform one small
+      // read so monitoring detects database failures instead of reporting 200.
+      let database=false;
+      if(env.DB){
+        try{
+          const result=await env.DB.prepare("SELECT 1 AS alive").first();
+          database=Number(result?.alive)===1;
+        }catch{
+          console.error("Database health check failed");
+        }
+      }
+      return Response.json(
+        {ok:database,bot:"atelier",mode:demo(env)?"demo":"production",database},
+        {status:database?200:503,headers:{"Cache-Control":"no-store"}}
+      );
+    }
     if(request.method==="GET"&&url.pathname.startsWith("/media/product/")){
       const id=safeInt(url.pathname.slice("/media/product/".length));
       return productImage(id,env);

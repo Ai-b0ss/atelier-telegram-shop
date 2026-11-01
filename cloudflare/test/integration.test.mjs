@@ -138,14 +138,14 @@ test('race: order must not consume some inventory when another item sells out',a
     assert.equal((await call(makeUpdate(seq++,{text:"@buyer"}))).status,200);
     assert.equal((await call(makeUpdate(seq++,{text:"Самовывоз"}))).status,200);
     assert(competitorRaced,"race was not injected");
-    const order=c.prepare("SELECT status FROM orders ORDER BY id DESC LIMIT 1").get();
-    assert.equal(order.status,"canceled");
+    assert.equal(c.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0,
+      "failed inventory batch must not persist a phantom order with contact data");
     assert.equal(c.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5,
       "available item must not be deducted when second item fails");
     assert.equal(c.prepare("SELECT stock FROM variants WHERE id=2").get().stock,0);
     assert.equal(c.prepare("SELECT COUNT(*) n FROM order_items").get().n,0);
     assert.equal(c.prepare("SELECT COUNT(*) n FROM cart_items").get().n,2);
-    assert(deliveries.some(e=>e.method==="sendMessage"&&e.data.text?.includes("Склад изменился")));
+    assert(deliveries.some(e=>e.method==="sendMessage"&&e.data.text?.includes("Заказ не оформлен")));
   }finally{globalThis.fetch=prior;storage.raw.close()}
 });
 
@@ -379,4 +379,180 @@ test('unshipped canceled order restocks automatically and cannot be manually ret
  assert.throws(()=>db.exec("INSERT INTO inventory_return_receipts(order_id,accepted_by,note) VALUES(1,777,'Wrong')"),/Physical return/);
  assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
  db.close();
+});
+
+
+test('Telegram checkout rejects partial cart when a variant is archived',async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-test-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Synthetic buyer')");
+  db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,1,1),(1,2,1)");
+  db.exec("UPDATE variants SET active=0 WHERE id=2");
+  const sent=[],originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    sent.push({url:String(url),body:JSON.parse(options.body)});
+    return Response.json({ok:true,result:true});
+  };
+  const send=async update=>{
+    const req=new Request("https://example.com/webhook",{
+      method:"POST",
+      headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(update)
+    });
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    assert.equal((await send(makeCallback(6001,"checkout"))).status,200);
+    for(const [i,text] of ["Demo Buyer","@demo","Самовывоз"].entries())
+      assert.equal((await send(makeUpdate(6002+i,{text}))).status,200);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=2").get().stock,8);
+    assert(sent.some(x=>x.body?.text?.includes("недоступ")),
+      "buyer must receive a clear warning about unavailable items");
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});
+
+
+test("two simultaneous manual refunds cannot exceed the received amount",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test')");
+  db.exec("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'custom','new')");
+  db.exec("INSERT INTO payments(order_id,kind,amount_cents,reference) VALUES(1,'received',10000,'FAKE-ORIGINAL')");
+  const base=storage.prepare.bind(storage);let arrivals=0,release;
+  const gate=new Promise(r=>{release=r});
+  storage.prepare=sql=>{
+    const stmt=base(sql);
+    if(sql.startsWith("SELECT kind,amount_cents FROM payments WHERE order_id=")){
+      const old=stmt.all.bind(stmt);
+      stmt.all=async()=>{
+        const result=await old();
+        if(++arrivals===2)release();
+        await gate;
+        return result;
+      };
+    }
+    return stmt;
+  };
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  const call=async(id,ref)=>{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(makeUpdate(id,{text:"/payment 1 refunded 80 "+ref}))
+    });
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    const rs=await Promise.all([call(77001,"FAKE-REF-1"),call(77002,"FAKE-REF-2")]);
+    assert(rs.every(x=>x.status===200));
+    const total=db.prepare("SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) AS n FROM payments WHERE order_id=1").get().n;
+    assert(total>=0,"two accepted refund requests cannot push the ledger negative");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM payments WHERE kind='refunded'").get().n,1);
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});
+
+
+test("Excel summary reports complete history when order and payment tabs are capped",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Synthetic accountant')");
+  db.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1005) "+
+    "INSERT INTO orders(id,customer_id,kind,status,total_cents,cost_cents) SELECT i,1,'custom','new',100,50 FROM n");
+  db.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1005) "+
+    "INSERT INTO payments(order_id,kind,amount_cents,reference) SELECT 1,'received',10,'' FROM n");
+  let xlsx=null;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    if(String(url).endsWith("/sendDocument"))
+      xlsx=Buffer.from(await options.body.get("document").arrayBuffer());
+    return Response.json({ok:true,result:true});
+  };
+  try{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(makeUpdate(99001,{text:"/report"}))
+    });
+    assert.equal((await worker.fetch(req,env,{waitUntil(){}})).status,200);
+    assert(xlsx,"Expected a generated real XLSX file");
+    // This XLSX writer uses stored (uncompressed) ZIP entries, so the sheet
+    // XML appears in the buffer and can be inspected without extra packages.
+    const raw=xlsx.toString("utf8");
+    assert.match(raw,/Количество заказов<\/t><\/is><\/c><c r="B2" t="n"><v>1005<\/v>/);
+    assert.match(raw,/Чистые поступления \(коп\.\)<\/t><\/is><\/c><c r="B3" t="n"><v>10050<\/v>/);
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});
+
+
+test("Telegram checkout preserves cart additions made before its stock transaction",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test')");
+  db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,1,1)");
+  const originalBatch=storage.batch.bind(storage);
+  let raced=false;
+  storage.batch=async commands=>{
+    if(!raced){
+      raced=true;
+      db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,2,1)");
+    }
+    return originalBatch(commands);
+  };
+  const originalFetch=globalThis.fetch;
+  const sent=[];
+  globalThis.fetch=async(url,opts)=>{
+    sent.push({url:String(url),body:JSON.parse(opts.body)});
+    return Response.json({ok:true,result:true});
+  };
+  const dispatch=async update=>{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(update)
+    });
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    assert.equal((await dispatch(makeCallback(88001,"checkout"))).status,200);
+    for(const [i,text] of ["Synthetic Client","@synthetic","Самовывоз"].entries())
+      assert.equal((await dispatch(makeUpdate(88002+i,{text}))).status,200);
+    assert.equal(raced,true);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,0);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    assert(sent.some(x=>x.body?.text?.includes("Заказ не оформлен")),
+      "buyer must be warned of an interrupted checkout");
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});
+
+
+test("forgetme unlinks Telegram identity and clears hidden cart/session/idempotency data",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name,username) VALUES(1,777,'Real Name','username')");
+  db.exec("INSERT INTO orders(id,customer_id,kind,status,contact_name,contact_phone,delivery_address) VALUES(1,1,'catalog','completed','Real Name','@username','Address')");
+  db.exec("INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(777,'old_key_1234567890',1)");
+  db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,1,1)");
+  db.exec("INSERT INTO sessions(telegram_id,flow,step,payload) VALUES(777,'custom','details','{}')");
+  const oldFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  try{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(makeUpdate(121001,{text:"/forgetme"}))
+    });
+    assert.equal((await worker.fetch(req,env,{waitUntil(){}})).status,200);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM customers WHERE telegram_id=777").get().n,0,
+      "a completed customer should no longer be linked to Telegram ID after forgetting");
+    assert.equal(db.prepare("SELECT telegram_id FROM customers WHERE id=1").get().telegram_id,-1,
+      "keep internal order link but replace externally identifying Telegram ID");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM checkout_requests WHERE telegram_id=777").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE telegram_id=777").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=1").get().n,0);
+    const order=db.prepare("SELECT contact_name,contact_phone,delivery_address FROM orders WHERE id=1").get();
+    assert.equal(order.contact_name,"");
+    assert.equal(order.contact_phone,"");
+    assert.equal(order.delivery_address,"");
+  }finally{globalThis.fetch=oldFetch;db.close()}
 });

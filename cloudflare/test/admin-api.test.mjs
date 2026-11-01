@@ -189,3 +189,194 @@ test("isolated simulated identities: administrator and two separate buyers",asyn
   assert.equal((await dashboard.json()).orders.length,2);
  }finally{globalThis.fetch=saved;db.close()}
 });
+
+
+test("dashboard aggregates include history beyond recent list limits",async()=>{
+  const storage=localDB(), db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    db.exec(`
+      INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test admin');
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<120)
+      INSERT INTO orders(id,customer_id,kind,status,total_cents,cost_cents)
+      SELECT i,1,'custom',CASE WHEN i<=50 THEN 'completed' ELSE 'new' END,2000,800 FROM n;
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1005)
+      INSERT INTO payments(order_id,kind,amount_cents,reference)
+      SELECT 1,'received',10,'' FROM n;
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<605)
+      INSERT INTO variants(product_id,sku,size,color,price_cents,cost_cents,stock,active)
+      SELECT 1,'EXTRA-'||i,'one size','test',100,10,1,1 FROM n;
+    `);
+    const response=await call(env,"/api/admin/dashboard");
+    assert.equal(response.status,200);
+    const d=await response.json();
+    assert.equal(d.orders.length,100,"recent orders should still be bounded");
+    assert.equal(d.variants.length,600,"editing list should still be bounded");
+    assert.equal(d.metrics.orderCount,120,"total order count must include old orders");
+    assert.equal(d.metrics.completedCount,50,"completed count must include old orders");
+    assert.equal(d.metrics.ordersByStatus.new,70);
+    assert.equal(d.metrics.ordersByStatus.completed,50);
+    assert.equal(d.metrics.bookedRevenueCents,240000);
+    assert.equal(d.metrics.grossMarginCents,60000);
+    assert.equal(d.metrics.paidNetCents,10050,"more than 1000 payment rows must be summed");
+    assert.equal(d.metrics.lowStockCount,605,"low stock count must include undisplayed variants");
+  }finally{db.close()}
+});
+
+
+test("cart can discard an archived variant but cannot add it again",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    db.exec("UPDATE variants SET active=0 WHERE id=1");
+    let cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items.length,1,"archived variants remain visible until removed");
+    assert.equal(cart.items[0].available,0,"archived cart line is marked unavailable");
+    let removed=await call(env,"/api/cart","POST",{variantId:1,delta:-1});
+    assert.equal(removed.status,200,"a user must be able to remove an archived variant");
+    assert.equal((await removed.json()).quantity,1);
+    removed=await call(env,"/api/cart","POST",{variantId:1,delta:-1});
+    assert.equal(removed.status,200);
+    assert.equal((await removed.json()).quantity,0);
+    cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items.length,0);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,404,
+      "an archived variant must never be purchasable again");
+  }finally{db.close()}
+});
+
+
+test("Mini App rejects partial checkout if any item became inactive",async()=>{
+  const storage=localDB(), db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:2,delta:1})).status,200);
+    db.exec("UPDATE variants SET active=0 WHERE id=2");
+    const response=await call(env,"/api/checkout","POST",{
+      requestKey:"partial_order_guard_0123456789",
+      name:"Test Buyer",phone:"@example",address:"Демо-самовывоз"
+    });
+    assert.equal(response.status,409,"one archived item must reject whole checkout");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=2").get().stock,8);
+  }finally{db.close()}
+});
+
+
+test("cart reflects stock shortage and recovers after reducing quantity",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    db.exec("UPDATE variants SET stock=1 WHERE id=1");
+    let cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items.length,1);
+    assert.equal(cart.items[0].available,0,"stock shortage must be visible before checkout");
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:-1})).status,200);
+    cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items[0].quantity,1);
+    assert.equal(cart.items[0].available,1,"reducing quantity must unblock checkout");
+  }finally{db.close()}
+});
+
+
+test("checkout rejects a cart changed between snapshot and atomic commit",async()=>{
+  const db=localDB(),raw=db.raw;
+  const env={DB:db,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    let inserted=false;
+    const underlying=db.batch.bind(db);
+    db.batch=async statements=>{
+      if(!inserted){
+        inserted=true;
+        // Another action on the same account adds a second product while the
+        // first checkout is waiting to commit. It must NOT disappear for free.
+        raw.prepare("INSERT INTO cart_items(customer_id,variant_id,quantity) SELECT id,2,1 FROM customers WHERE telegram_id=777").run();
+      }
+      return underlying(statements);
+    };
+    const response=await call(env,"/api/checkout","POST",{
+      requestKey:"cart_snapshot_race_012345678",
+      name:"Synthetic Buyer",phone:"@test",address:"Test pickup"
+    });
+    assert.equal(inserted,true);
+    assert.equal(response.status,409,"changed cart must be retried rather than silently truncated");
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,0);
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0,
+      "failed checkout must not retain a phantom order with contact data");
+    assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(raw.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+  }finally{globalThis.fetch=originalFetch;raw.close()}
+});
+
+
+test("concurrent add-to-cart requests must not overwrite each other",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const originalPrepare=storage.prepare.bind(storage);
+  let arrivals=0;let release;
+  const gate=new Promise(resolve=>{release=resolve});
+  storage.prepare=sql=>{
+    const stmt=originalPrepare(sql);
+    if(sql.startsWith("SELECT quantity FROM cart_items WHERE customer_id")){
+      const originalFirst=stmt.first.bind(stmt);
+      stmt.first=async()=>{
+        const read=await originalFirst();
+        if(++arrivals===2)release();
+        await gate;  // Both requests observe the same original cart before either writes.
+        return read;
+      };
+    }
+    return stmt;
+  };
+  try{
+    const responses=await Promise.all([
+      call(env,"/api/cart","POST",{variantId:1,delta:1}),
+      call(env,"/api/cart","POST",{variantId:1,delta:1})
+    ]);
+    assert.deepEqual(responses.map(r=>r.status),[200,200]);
+    assert.equal(db.prepare("SELECT quantity FROM cart_items WHERE variant_id=1").get().quantity,2,
+      "two accepted increments must result in quantity two, not one");
+  }finally{db.close()}
+});
+
+
+test("checkout also rejects changed quantity or seller price before commit",async()=>{
+  for(const mutation of ["quantity","price"]){
+    const storage=localDB(),db=storage.raw;
+    const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+    const originalFetch=globalThis.fetch;
+    globalThis.fetch=async()=>Response.json({ok:true,result:true});
+    try{
+      assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+      const beforeStock=db.prepare("SELECT stock FROM variants WHERE id=1").get().stock;
+      let raced=false;
+      const base=storage.batch.bind(storage);
+      storage.batch=async commands=>{
+        if(!raced){
+          raced=true;
+          if(mutation==="quantity")db.exec("UPDATE cart_items SET quantity=2 WHERE variant_id=1");
+          else db.exec("UPDATE variants SET price_cents=price_cents+100 WHERE id=1");
+        }
+        return base(commands);
+      };
+      const resp=await call(env,"/api/checkout","POST",{
+        requestKey:"verify_snapshot_"+mutation+"_abcdef01234",
+        name:"Demo User",phone:"@demo",address:"Самовывоз"
+      });
+      assert.equal(resp.status,409,"checkout must reject mid-flight "+mutation+" changes");
+      assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,beforeStock);
+      assert.equal(db.prepare("SELECT COUNT(*) n FROM order_items").get().n,0);
+      assert.equal(db.prepare("SELECT COUNT(*) n FROM cart_items").get().n,1);
+    }finally{globalThis.fetch=originalFetch;db.close()}
+  }
+});

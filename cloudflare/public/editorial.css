@@ -97,3 +97,12 @@ footer{font-size:11px;margin-top:32px}
 body.is-inner-view .hero{display:none}
 body.is-inner-view .notice{margin-top:16px;margin-bottom:6px}
 body.is-inner-view .section-heading{margin-top:24px}
+
+/* In mobile Telegram WebView, a fixed bottom nav can cover form fields when
+   the software keyboard appears. Hide nav while editing; preserve form scroll. */
+@media (max-width:520px){
+  body:has(input:focus,textarea:focus,select:focus) .bottom-nav{
+    visibility:hidden;
+    pointer-events:none;
+  }
+}

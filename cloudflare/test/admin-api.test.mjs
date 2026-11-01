@@ -18,7 +18,7 @@ function makeInitData(id=777,date=Math.floor(Date.now()/1000)){
 }
 function localDB(){
   const db=new DatabaseSync(":memory:");
-  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql","migrations/0009_uploaded_photos.sql"]){
+  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql","migrations/0009_uploaded_photos.sql","migrations/0010_status_quote_outbox.sql"]){
     db.exec(readFileSync(new URL("../"+file,import.meta.url),"utf8"));
   }
   return {
@@ -512,6 +512,12 @@ test("customers review a product once, abuse can be hidden and anyone can read",
     assert.equal((await post({productId:product,rating:6,text:"Отлично сидит"})).status,400);
     assert.equal((await post({productId:product,rating:5,text:"  "})).status,400);
     assert.equal((await post({productId:999999,rating:5,text:"Отлично сидит"})).status,404);
+    assert.equal((await post({productId:product,rating:5,text:"<b>Отлично</b> сидит"})).status,403,
+      "a visitor who never completed a purchase must not review the product");
+    const variant=DB.raw.prepare("SELECT id FROM variants WHERE product_id=? LIMIT 1").get(product).id;
+    const customerId=DB.raw.prepare("SELECT id FROM customers WHERE telegram_id=200").get().id;
+    const order=DB.raw.prepare("INSERT INTO orders(customer_id,kind,status) VALUES(?,'catalog','completed')").run(customerId);
+    DB.raw.prepare("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,'M','black',1,100000,50000)").run(Number(order.lastInsertRowid),variant,'Purchased');
     assert.equal((await post({productId:product,rating:5,text:"<b>Отлично</b> сидит"})).status,200);
     assert.equal((await post({productId:product,rating:3,text:"Подумал ещё раз"})).status,200);
     const read=async()=>{
@@ -586,4 +592,52 @@ test("customers see only their own orders with status history",async()=>{
   assert.deepEqual(mine.orders[0].statuses.slice(-2),["new","confirmed"]);
   assert.match(mine.orders[0].managerUrl,/seller_01/);
   assert.equal((await (await call(env,"/api/orders","GET",null,makeInitData(202))).json()).orders.length,0);
+});
+
+test("status and quote notices survive Telegram outage, stale quote is not sent", async()=>{
+  const DB=localDB(), env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const db=DB.raw;
+  db.exec("INSERT INTO customers(telegram_id,full_name) VALUES(888,'Independent buyer')");
+  const customer=db.prepare("SELECT id FROM customers WHERE telegram_id=888").get().id;
+  const orderId=Number(db.prepare("INSERT INTO orders(customer_id,kind,status) VALUES(?,'custom','new')").run(customer).lastInsertRowid);
+  const original=globalThis.fetch;
+  const sent=[];
+  try{
+    globalThis.fetch=async()=>new Response("{}",{status:502});
+    const quote=await call(env,"/api/admin/quote","POST",{id:orderId,priceCents:420000,costCents:210000});
+    assert.equal(quote.status,200);
+    assert.equal((await quote.json()).delivered,false);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM notification_outbox WHERE event_type='quote_1'").get().n,1);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM notification_outbox WHERE event_type='quote_1' AND delivered_at IS NULL").get().n,1);
+    // A revised quote supersedes the old offer, even if the old event was queued.
+    assert.equal((await call(env,"/api/admin/quote","POST",{id:orderId,priceCents:520000,costCents:250000})).status,200);
+    db.exec("UPDATE notification_outbox SET next_attempt_at=datetime('now','-1 minute'),lease_until=NULL");
+    globalThis.fetch=async(_,init)=>{sent.push(JSON.parse(init.body));return new Response("{}");};
+    const {deliverOutbox}=await import("../src/outbox.js");
+    await deliverOutbox(env);
+    assert.equal(sent.filter(x=>x.text?.includes("Смета")).length,1);
+    assert.match(sent.find(x=>x.text?.includes("Смета")).text,/5200.00/);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM notification_outbox WHERE delivered_at IS NULL").get().n,0);
+    // Saving the state automatically adds a notification; an outage cannot erase the event.
+    globalThis.fetch=async()=>new Response("{}",{status:503});
+    const changed=await call(env,"/api/admin/order/status","POST",{id:orderId,status:"confirmed"});
+    assert.equal(changed.status,200);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM notification_outbox WHERE event_type='status_confirmed'").get().n,1);
+    db.exec("UPDATE notification_outbox SET next_attempt_at=datetime('now','-1 minute'),lease_until=NULL");
+    globalThis.fetch=async(_,init)=>{sent.push(JSON.parse(init.body));return new Response("{}");};
+    await deliverOutbox(env);
+    assert.equal(sent.filter(x=>x.text?.includes("Статус заказа")).length,1);
+  }finally{globalThis.fetch=original;db.close()}
+});
+
+test("business sales lock blocks buyers but still permits admin stock corrections",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"0",STORE_READY:"1",SALES_LOCKED:"1"};
+  try{
+    const buyer=makeInitData(888);
+    assert.equal((await call(env,"/api/cart","GET",null,buyer)).status,403);
+    assert.equal((await call(env,"/api/me","GET",null,buyer)).status,200);
+    assert.equal((await (await call(env,"/api/me")).json()).demo,true);
+    assert.equal((await call(env,"/api/admin/dashboard")).status,200);
+  }finally{DB.raw.close()}
 });

@@ -18,6 +18,7 @@
   "vars": {
     "DEMO_MODE": "0",
     "STORE_READY": "1",
+    "SALES_LOCKED": "1",
     "MANAGER_USERNAME": "onlyrazor"
   }
 }

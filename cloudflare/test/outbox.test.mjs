@@ -14,7 +14,7 @@ const wrap=stmt=>({...bound(stmt),bind:(...v)=>bound(stmt,v)});
 function makeEnv(){
   const db=new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("../migrations/0005_notification_outbox.sql",import.meta.url),"utf8"));
-  db.exec("CREATE TABLE orders(id INTEGER PRIMARY KEY,kind TEXT,total_cents INTEGER,contact_name TEXT,contact_phone TEXT,delivery_address TEXT,custom_details TEXT,custom_measurements TEXT);CREATE TABLE order_items(id INTEGER PRIMARY KEY,order_id INTEGER,product_name TEXT,size TEXT,color TEXT,quantity INTEGER);");
+  db.exec("CREATE TABLE orders(id INTEGER PRIMARY KEY,kind TEXT,status TEXT DEFAULT 'new',quote_revision INTEGER DEFAULT 0,total_cents INTEGER,contact_name TEXT,contact_phone TEXT,delivery_address TEXT,custom_details TEXT,custom_measurements TEXT);CREATE TABLE order_items(id INTEGER PRIMARY KEY,order_id INTEGER,product_name TEXT,size TEXT,color TEXT,quantity INTEGER);");
   db.exec("INSERT INTO orders(id,kind,total_cents) VALUES(7,'catalog',500000);INSERT INTO order_items VALUES(1,7,'Жакет','M','чёрный',1);");
   const DB={prepare:sql=>wrap(db.prepare(sql))};
   return {db,env:{DB,BOT_TOKEN:"t",ADMIN_IDS:"100,200",DEMO_MODE:"0",STORE_READY:"1",MANAGER_USERNAME:"seller_01"}};

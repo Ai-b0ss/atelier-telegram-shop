@@ -82,42 +82,12 @@ function renderProducts(){
       '<span class="product-photo">'+photoHtml(p)+'</span>'+
       '<span class="product-meta"><b>'+esc(p.name)+'</b><span>'+esc(label)+'</span></span></button>';
   }).join(""):'<div class="card padded empty">В этой категории пока ничего нет.</div>';
-  revealCards();
-}
-const calm=()=>matchMedia("(prefers-reduced-motion:reduce)").matches;
-let revealer=null;
-function revealCards(){
-  if(calm()||!("IntersectionObserver" in window))return;
-  revealer?.disconnect();
-  revealer=new IntersectionObserver(entries=>entries.forEach(entry=>{
-    if(!entry.isIntersecting)return;
-    entry.target.classList.remove("veiled");
-    revealer.unobserve(entry.target);
-  }),{threshold:.12});
-  document.querySelectorAll(".product-card").forEach(card=>{card.classList.add("veiled");revealer.observe(card)});
 }
 function galleryHtml(p){
   if(!(p.images?.length>1))return '<div class="sheet-photo">'+photoHtml(p)+'</div>';
   return '<div class="sheet-photo gallery"><div class="gallery-track" tabindex="0" aria-label="Фотографии товара">'+
     p.images.map((src,i)=>'<div class="gallery-slide"><img class="product-image" alt="'+esc(p.name)+', фото '+(i+1)+'" decoding="async" '+(i?'loading="lazy" ':'')+'src="'+esc(src)+'" data-photo></div>').join("")+
     '</div><div class="gallery-dots" aria-hidden="true">'+p.images.map((_,i)=>'<i class="'+(i?"":"on")+'"></i>').join("")+'</div></div>';
-}
-function flyToBag(image){
-  const bag=$("cart-top");
-  if(!image||!bag||calm()||!image.animate)return;
-  const from=image.getBoundingClientRect(),to=bag.getBoundingClientRect();
-  if(!from.width||!to.width)return;
-  const ghost=image.cloneNode(false);
-  ghost.removeAttribute("data-photo");
-  ghost.className="fly-ghost";
-  Object.assign(ghost.style,{left:from.left+"px",top:from.top+"px",width:from.width+"px",height:from.height+"px"});
-  document.body.append(ghost);
-  const dx=to.left+to.width/2-from.left-from.width/2,dy=to.top+to.height/2-from.top-from.height/2;
-  ghost.animate([
-    {transform:"none",opacity:1,borderRadius:"14px"},
-    {transform:"translate("+dx*.55+"px,"+(dy*.55-40)+"px) scale(.45) rotate(-6deg)",opacity:1,offset:.6},
-    {transform:"translate("+dx+"px,"+dy+"px) scale(.05) rotate(-12deg)",opacity:.2,borderRadius:"50%"}
-  ],{duration:650,easing:"cubic-bezier(.5,0,.2,1)"}).finished.catch(()=>{}).finally(()=>ghost.remove());
 }
 function openSheet(productId){
   const p=state.catalog?.products.find(x=>x.id===productId);if(!p)return;
@@ -395,9 +365,7 @@ async function init(){
       try{
         await api("/api/cart","POST",{variantId,delta:1});
         haptic("medium");
-        const shown=$("sheet-content").querySelector(".sheet-photo img");
         closeSheet();
-        setTimeout(()=>flyToBag(shown),calm()?0:220);
         toast("Добавлено в корзину");
         await loadCart();
       }finally{

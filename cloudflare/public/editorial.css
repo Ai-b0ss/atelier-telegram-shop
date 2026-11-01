@@ -92,3 +92,8 @@ footer{font-size:11px;margin-top:32px}
 .nav-icon{display:inline-grid;place-items:center;width:24px;height:24px}
 .nav-icon svg{width:21px;height:21px;display:block}
 .icon-button svg{width:23px;height:23px;display:block}
+
+/* Inner routes prioritize tasks over the catalogue hero. */
+body.is-inner-view .hero{display:none}
+body.is-inner-view .notice{margin-top:16px;margin-bottom:6px}
+body.is-inner-view .section-heading{margin-top:24px}

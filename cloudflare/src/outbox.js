@@ -30,8 +30,22 @@ const buyerLines=order=>"Покупатель: "+(order.contact_name||"—")+"\n
 
 async function render(env,row){
   const demo=demoMode(env);
-  const order=await env.DB.prepare("SELECT id,kind,total_cents,contact_name,contact_phone,delivery_address,custom_details,custom_measurements FROM orders WHERE id=?").bind(row.order_id).first();
+  const order=await env.DB.prepare("SELECT id,kind,status,quote_revision,total_cents,contact_name,contact_phone,delivery_address,custom_details,custom_measurements FROM orders WHERE id=?").bind(row.order_id).first();
   if(!order)return null;
+  // Old queued versions are superseded, never send stale price offers or status.
+  if(row.event_type.startsWith("status_")){
+    const status=row.event_type.slice("status_".length);
+    if(status!==order.status)return {obsolete:true};
+    return {text:"Статус заказа №"+order.id+": "+status};
+  }
+  if(/^quote_[1-9]\d*$/.test(row.event_type)){
+    const version=Number(row.event_type.slice(6));
+    if(order.kind!=="custom"||order.status!=="new"||version!==order.quote_revision)return {obsolete:true};
+    const price=Number(order.total_cents);
+    return {text:"Смета по заявке №"+order.id+": "+(price/100).toFixed(2)+" ₽. Подтвердите или отклоните предложение.",reply_markup:{
+      inline_keyboard:[[{text:"Согласен",callback_data:"qa:"+order.id+":"+version+":"+price},{text:"Отклонить",callback_data:"qr:"+order.id+":"+version+":"+price}]]
+    }};
+  }
   if(row.event_type==="catalog_customer"){
     if(demo)return {text:"Тестовый заказ №"+order.id+" создан. Оплата не проводилась."};
     const items=(await env.DB.prepare("SELECT product_name AS name,size,color,quantity FROM order_items WHERE order_id=? ORDER BY id").bind(order.id).all()).results||[];
@@ -84,7 +98,7 @@ export async function deliverOutbox(env,{orderId=null,limit=20}={}){
     let outcome;
     try{
       const message=await render(env,row);
-      outcome=message?await sendTelegram(env,row.recipient_id,message):"rejected";
+      outcome=message?.obsolete?"delivered":message?await sendTelegram(env,row.recipient_id,message):"rejected";
     }catch{outcome="retry"}
     const attempts=row.attempts+1;
     if(outcome==="delivered"){

@@ -73,7 +73,8 @@ jobs:
           config=json.loads(Path("cloudflare/wrangler.jsonc").read_text("utf-8"))
           vars=config.get("vars", {})
           assert vars.get("DEMO_MODE") == "0", "The live store must not return to demo through a code change"
-          assert vars.get("STORE_READY") == "1", "The live store must keep sales enabled"
+          assert vars.get("STORE_READY") == "1", "Configured inventory readiness must remain explicit"
+assert vars.get("SALES_LOCKED") == "1", "Keep sales paused until the seller verifies prices and stock"
           print("Versioned Worker configuration is the live store")
           PY
 

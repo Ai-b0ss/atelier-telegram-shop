@@ -267,9 +267,8 @@ export function makeHandler(env) {
       "?!='canceled' OR COALESCE((SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) FROM payments WHERE order_id=?),0)<=0)",
       status,order.id,order.status,status,order.id);
     if(res.meta.changes!==1)return send(id,"Статус или оплаты изменились. Обновите /order и повторите.");
-    const c=await first(db,"SELECT telegram_id FROM customers WHERE id=?",order.customer_id);
     await send(id,"Заказ №"+order.id+": "+ru[status]);
-    if(c&&c.telegram_id!==id)try{await send(c.telegram_id,"Статус заказа №"+order.id+": "+ru[status])}catch{}
+    try{await deliverOutbox(env,{orderId:order.id})}catch{}
   }
   async function report(id){
     const orders=await rows(db,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at FROM orders o ORDER BY o.id DESC LIMIT 1000");
@@ -346,9 +345,8 @@ export function makeHandler(env) {
       const applied=await run(db,"UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND quote_revision=? AND status='new'",price,cost,revision,oid,o.quote_revision);
       if(applied.meta.changes!==1)return send(id,"Смета не отправлена: заявка уже изменилась. Проверьте /order "+oid+" и повторите /quote.");
       await send(id,"Смета №"+oid+": "+rub(price)+", себестоимость "+rub(cost));
-      try{await send(o.telegram_id,"Предложение по индивидуальному заказу №"+oid+": "+rub(price)+". Подтвердите цену:",kb([
-        ["Согласен с ценой","qa:"+oid+":"+revision+":"+price],["Отменить заявку","qr:"+oid+":"+revision+":"+price]
-      ]))}catch{await send(id,"Не удалось доставить предложение заказчику.")}
+      // Trigger 0010 enqueues the versioned offer with the quote update.
+      try{await deliverOutbox(env,{orderId:oid})}catch{}
       return;
     }
     if(cmd==="/payment"){
@@ -546,6 +544,7 @@ export function makeHandler(env) {
         db.prepare("UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?").bind(c.id),
         db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
         db.prepare("DELETE FROM checkout_requests WHERE telegram_id=?").bind(id),
+        db.prepare("DELETE FROM notification_outbox WHERE recipient_id=?").bind(id),
         db.prepare("DELETE FROM sessions WHERE telegram_id=?").bind(id),
         db.prepare("DELETE FROM reviews WHERE customer_id=?").bind(c.id),
         db.prepare("UPDATE customers SET telegram_id=-id,full_name='',username='' WHERE id=?").bind(c.id)

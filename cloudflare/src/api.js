@@ -239,6 +239,14 @@ export async function handleApi(request,env,url){
     const product=await first(env.DB,"SELECT id,name FROM products WHERE id=? AND active=1",productId);
     if(!product)return err("Товар не найден",404);
     const c=await getCustomer(env.DB,u);
+    // Only a completed purchase of this same product grants review eligibility.
+    // Ownership is checked against authoritative order items, not a client-supplied flag.
+    const purchased=await first(env.DB,
+      "SELECT 1 AS eligible FROM orders o JOIN order_items i ON i.order_id=o.id "+
+      "JOIN variants v ON v.id=i.variant_id "+
+      "WHERE o.customer_id=? AND o.status='completed' AND o.kind='catalog' "+
+      "AND v.product_id=? LIMIT 1",c.id,productId);
+    if(!purchased)return err("Оставить отзыв можно после получения купленной вещи",403);
     // A repeat review replaces the first; one hidden by an administrator stays hidden.
     await run(env.DB,"INSERT INTO reviews(product_id,customer_id,author_name,rating,body) VALUES(?,?,?,?,?) "+
       "ON CONFLICT(product_id,customer_id) DO UPDATE SET author_name=excluded.author_name,rating=excluded.rating,body=excluded.body,updated_at=CURRENT_TIMESTAMP",
@@ -419,8 +427,10 @@ export async function handleApi(request,env,url){
       "?!='canceled' OR COALESCE((SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) FROM payments WHERE order_id=?),0)<=0)",
       status,id,o.status,status,id);
     if(updated.meta.changes!==1)return err("Status or payments changed",409);
-    try{await telegramSend(env,o.telegram_id,"Статус заказа №"+id+": "+status);}catch{}
-    return json({ok:true,id,status});
+    // Migration 0010 queues status changes atomically with UPDATE orders.
+    // Failure to send now is harmless: scheduled outbox retries delivery.
+    try{await deliverOutbox(env,{orderId:id})}catch{}
+    return json({ok:true,id,status,queued:true});
   }
   if(request.method==="POST"&&path==="/api/admin/order/return"){
     const b=await safeBody(request);
@@ -450,10 +460,10 @@ export async function handleApi(request,env,url){
     const version=o.quote_revision+1;
     const updated=await run(env.DB,"UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=? WHERE id=? AND quote_revision=? AND status='new'",price,cost,version,id,o.quote_revision);
     if(updated.meta.changes!==1)return err("Quote already changed",409);
-    try{await telegramSend(env,o.telegram_id,"Смета по заявке №"+id+": "+(price/100).toFixed(2)+" ₽. Подтвердите или отклоните предложение.",{
-      inline_keyboard:[[{text:"Согласен",callback_data:"qa:"+id+":"+version+":"+price},{text:"Отклонить",callback_data:"qr:"+id+":"+version+":"+price}]]
-    });return json({ok:true,version,delivered:true})}
-    catch{return json({ok:true,version,delivered:false})}
+    // Update trigger puts versioned offer in notification_outbox in the same transaction.
+    try{await deliverOutbox(env,{orderId:id})}catch{}
+    const notice=await first(env.DB,"SELECT delivered_at FROM notification_outbox WHERE order_id=? AND recipient_id=? AND event_type=?",id,o.telegram_id,"quote_"+version);
+    return json({ok:true,version,queued:true,delivered:Boolean(notice?.delivered_at)});
   }
   return err("Not found",404);
 }

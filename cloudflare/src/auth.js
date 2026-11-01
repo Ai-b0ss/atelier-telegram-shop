@@ -45,4 +45,4 @@ export function isAdmin(env,id){
   return String(env.ADMIN_IDS||"").split(",").some(x=>x.trim()===String(id));
 }
 
-export function demoMode(env){return env.DEMO_MODE!=="0"||env.STORE_READY!=="1"}
+export function demoMode(env){return env.DEMO_MODE!=="0"||env.STORE_READY!=="1"||env.SALES_LOCKED==="1"}

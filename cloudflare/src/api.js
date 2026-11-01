@@ -22,7 +22,7 @@ async function safeBody(request){
   // A valid Telegram signature is not permission to exhaust the Worker by
   // submitting unbounded JSON. Limit actual streamed bytes, not only headers.
   const length=request.headers.get("content-length");
-  if(length&&/^\\d+$/.test(length)&&Number(length)>MAX_JSON_BODY_BYTES)
+  if(length&&/^\d+$/.test(length)&&Number(length)>MAX_JSON_BODY_BYTES)
     throw new RequestBodyError("Request body too large",413);
   const reader=request.body?.getReader();
   if(!reader)throw new RequestBodyError("Invalid JSON body",400);

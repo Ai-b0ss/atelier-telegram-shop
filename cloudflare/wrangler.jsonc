@@ -16,8 +16,8 @@
     }
   ],
   "vars": {
-    "DEMO_MODE": "0",
-    "STORE_READY": "1",
+    "DEMO_MODE": "1",
+    "STORE_READY": "0",
     "MANAGER_USERNAME": "onlyrazor"
   }
 }

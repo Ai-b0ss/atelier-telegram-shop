@@ -380,3 +380,36 @@ test('unshipped canceled order restocks automatically and cannot be manually ret
  assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
  db.close();
 });
+
+
+test('Telegram checkout rejects partial cart when a variant is archived',async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-test-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Synthetic buyer')");
+  db.exec("INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(1,1,1),(1,2,1)");
+  db.exec("UPDATE variants SET active=0 WHERE id=2");
+  const sent=[],originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    sent.push({url:String(url),body:JSON.parse(options.body)});
+    return Response.json({ok:true,result:true});
+  };
+  const send=async update=>{
+    const req=new Request("https://example.com/webhook",{
+      method:"POST",
+      headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(update)
+    });
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    assert.equal((await send(makeCallback(6001,"checkout"))).status,200);
+    for(const [i,text] of ["Demo Buyer","@demo","Самовывоз"].entries())
+      assert.equal((await send(makeUpdate(6002+i,{text}))).status,200);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=2").get().stock,8);
+    assert(sent.some(x=>x.body?.text?.includes("недоступ")),
+      "buyer must receive a clear warning about unavailable items");
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});

@@ -346,3 +346,35 @@ test("concurrent add-to-cart requests must not overwrite each other",async()=>{
       "two accepted increments must result in quantity two, not one");
   }finally{db.close()}
 });
+
+
+test("checkout also rejects changed quantity or seller price before commit",async()=>{
+  for(const mutation of ["quantity","price"]){
+    const storage=localDB(),db=storage.raw;
+    const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+    const originalFetch=globalThis.fetch;
+    globalThis.fetch=async()=>Response.json({ok:true,result:true});
+    try{
+      assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+      const beforeStock=db.prepare("SELECT stock FROM variants WHERE id=1").get().stock;
+      let raced=false;
+      const base=storage.batch.bind(storage);
+      storage.batch=async commands=>{
+        if(!raced){
+          raced=true;
+          if(mutation==="quantity")db.exec("UPDATE cart_items SET quantity=2 WHERE variant_id=1");
+          else db.exec("UPDATE variants SET price_cents=price_cents+100 WHERE id=1");
+        }
+        return base(commands);
+      };
+      const resp=await call(env,"/api/checkout","POST",{
+        requestKey:"verify_snapshot_"+mutation+"_abcdef01234",
+        name:"Demo User",phone:"@demo",address:"Самовывоз"
+      });
+      assert.equal(resp.status,409,"checkout must reject mid-flight "+mutation+" changes");
+      assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,beforeStock);
+      assert.equal(db.prepare("SELECT COUNT(*) n FROM order_items").get().n,0);
+      assert.equal(db.prepare("SELECT COUNT(*) n FROM cart_items").get().n,1);
+    }finally{globalThis.fetch=originalFetch;db.close()}
+  }
+});

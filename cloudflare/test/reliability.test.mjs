@@ -123,7 +123,8 @@ test("model-based sequences preserve user isolation, stock, orders and idempoten
             record.action="add";
             const expected=model.active[variant]&&model.stock[variant]>cart[variant];
             const r=await call(env,buyer,"/api/cart","POST",{variantId:variant+1,delta:1});
-            assert.equal(r.status,expected?200:409,"add must respect stock and active state");
+            const expectedStatus=!model.active[variant]?404:expected?200:409;
+            assert.equal(r.status,expectedStatus,"add must respect stock and active state");
             if(expected)cart[variant]++;
           }else if(action<61){ // remove, including absent or archived
             record.action="remove";

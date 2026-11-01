@@ -103,43 +103,48 @@ export async function handleApi(request,env,url){
       return err("Cart has unavailable items or stock changed. Review the cart.",409);
     const total=items.reduce((n,x)=>n+x.price_cents*x.quantity,0);
     const cost=items.reduce((n,x)=>n+x.cost_cents*x.quantity,0);
-    const result=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,name,phone,address);
-    const orderId=result.meta.last_row_id;
+    // Order header, idempotency, stock reservation, line items and cart
+    // clearance must share ONE D1 transaction. A second cleanup query is
+    // unsafe if the database becomes unavailable after a failed batch.
+    let orderId;
     try{
-      await env.DB.batch([
-        dbStatement(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,orderId),
+      const results=await env.DB.batch([
+        dbStatement(env.DB,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",
+          c.id,total,cost,name,phone,address),
+        // D1 batch executes statements sequentially in one SQLite transaction;
+        // last_insert_rowid() still refers to the preceding orders INSERT.
+        dbStatement(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,last_insert_rowid())",
+          u.id,requestKey),
         ...items.map(x=>dbStatement(env.DB,
-          // Force a CHECK failure (and rollback this entire D1 batch) when
-          // another request changes any cart line, or the seller changes
-          // the price, cost or availability after we read the snapshot.
           "UPDATE variants SET stock=CASE WHEN active=1 AND price_cents=? AND cost_cents=? "+
           "AND EXISTS(SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1) "+
           "AND EXISTS(SELECT 1 FROM cart_items ci WHERE ci.customer_id=? AND ci.variant_id=variants.id AND ci.quantity=?) "+
           "AND (SELECT COUNT(*) FROM cart_items WHERE customer_id=?)=? "+
           "THEN stock-? ELSE -1 END WHERE id=?",
           x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
-        ...items.map(x=>dbStatement(env.DB,"INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)",
-          orderId,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
+        ...items.map(x=>dbStatement(env.DB,
+          "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) "+
+          "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),?,?,?,?,?,?,?)",
+          u.id,requestKey,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
         dbStatement(env.DB,"DELETE FROM cart_items WHERE customer_id=?",c.id),
-        dbStatement(env.DB,"INSERT INTO status_history(order_id,new_status) VALUES(?,'new')",orderId)
+        dbStatement(env.DB,
+          "INSERT INTO status_history(order_id,new_status) "+
+          "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),'new')",
+          u.id,requestKey)
       ]);
+      orderId=Number(results[0]?.meta?.last_row_id||0);
+      if(!orderId){
+        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        orderId=committed?.order_id;
+      }
     }catch{
-      // The order header was inserted before the atomic batch. A failed
-      // inventory transaction must not retain a phantom order with PII.
-      // Never delete a successfully committed order (items/request key exist).
-      const removed=await run(env.DB,
-        "DELETE FROM orders WHERE id=? AND status='new' "+
-        "AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?) "+
-        "AND NOT EXISTS(SELECT 1 FROM checkout_requests WHERE order_id=?)",
-        orderId,orderId,orderId);
-      if(removed.meta.changes===0)await run(env.DB,
-        "UPDATE orders SET contact_name='',contact_phone='',delivery_address='' "+
-        "WHERE id=? AND status='new' AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?) "+
-        "AND NOT EXISTS(SELECT 1 FROM checkout_requests WHERE order_id=?)",orderId,orderId,orderId);
+      // A failed D1 batch rolls everything back, including the order header
+      // and personal information. No compensating DELETE is necessary.
       const found=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
       if(found)return json({ok:true,orderId:found.order_id,duplicate:true});
       return err("Stock or cart changed during checkout. Your cart is preserved.",409);
     }
+    if(!orderId)return err("Order committed but confirmation could not be retrieved; contact support.",503);
     try{await telegramSend(env,u.id,"Демо-заказ №"+orderId+" оформлен. Оплата не проводилась.");}catch{}
     for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
       if(adminId===u.id)continue;
@@ -157,20 +162,33 @@ export async function handleApi(request,env,url){
     const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
     if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
     const c=await getCustomer(env.DB,u);
-    const ins=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)",
-      c.id,name,phone,address,description,measurements);
+    let orderId;
     try{
-      await run(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,ins.meta.last_row_id);
+      const results=await env.DB.batch([
+        dbStatement(env.DB,
+          "INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) "+
+          "VALUES(?,'custom','new',?,?,?,?,?)",
+          c.id,name,phone,address,description,measurements),
+        dbStatement(env.DB,
+          "INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,last_insert_rowid())",
+          u.id,requestKey)
+      ]);
+      orderId=Number(results[0]?.meta?.last_row_id||0);
+      if(!orderId){
+        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        orderId=committed?.order_id;
+      }
     }catch{
-      await run(env.DB,"UPDATE orders SET status='canceled' WHERE id=? AND status='new'",ins.meta.last_row_id);
+      // No orphan or personal data remains after a failed D1 transaction.
       const existing=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
       if(existing)return json({ok:true,orderId:existing.order_id,duplicate:true});
       return err("Request could not be saved; retry",409);
     }
+    if(!orderId)return err("Request saved but confirmation unavailable; contact support.",503);
     for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
-      try{await telegramSend(env,adminId,"Новая тестовая заявка на индивидуальный пошив №"+ins.meta.last_row_id+" из Mini App.");}catch{}
+      try{await telegramSend(env,adminId,"Новая тестовая заявка на индивидуальный пошив №"+orderId+" из Mini App.");}catch{}
     }
-    return json({ok:true,orderId:ins.meta.last_row_id});
+    return json({ok:true,orderId});
   }
   if(request.method==="GET"&&path==="/api/admin/dashboard"){
     const products=await rows(env.DB,"SELECT p.id,p.name,p.description,p.category_id,p.active,p.photo_file_id,c.name AS category_name FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id LIMIT 200");

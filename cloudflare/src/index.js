@@ -85,14 +85,15 @@ export function makeHandler(env) {
       return send(id,"Некоторые изделия в корзине больше недоступны. Удалите их в корзине и повторите оформление.");
     if(items.some(x=>x.stock<x.quantity))return send(id,"Недостаточно изделий на складе — проверьте корзину.");
     const total=items.reduce((v,x)=>v+x.quantity*x.price_cents,0),cost=items.reduce((v,x)=>v+x.quantity*x.cost_cents,0);
-    const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,data.name,data.phone,addr);
-    const oid=ins.meta.last_row_id;
-    if(!oid)throw new Error("Order ID unavailable");
-    // D1 batch() is atomic. A constraint failure rolls back *all* stock
-    // deductions, order items, cart removal and status history together.
-    // The variants CHECK(stock >= 0) is the concurrency guard: unlike a
-    // conditional WHERE stock>=?, it fails the transaction on a sold-out SKU.
+    const botKey="bot_"+crypto.randomUUID().replaceAll("-","");
+    // Store the header and all related records in ONE transactional D1 batch.
+    // The idempotency row gives every later statement a stable reference to
+    // the new order even after last_insert_rowid() changes on another INSERT.
     const statements=[
+      db.prepare("INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)")
+        .bind(c.id,total,cost,data.name,data.phone,addr),
+      db.prepare("INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,last_insert_rowid())")
+        .bind(u.id,botKey),
       ...items.map(x=>db.prepare(
         "UPDATE variants SET stock=CASE WHEN active=1 AND price_cents=? AND cost_cents=? AND EXISTS("+
         "SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1"+
@@ -101,26 +102,28 @@ export function makeHandler(env) {
         " THEN stock-? ELSE -1 END WHERE id=?"
       ).bind(x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
       ...items.map(x=>db.prepare(
-        "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)"
-      ).bind(oid,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
+        "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) "+
+        "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),?,?,?,?,?,?,?)"
+      ).bind(u.id,botKey,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
       db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
-      db.prepare("INSERT INTO status_history(order_id,new_status) VALUES(?,'new')").bind(oid)
+      db.prepare("INSERT INTO status_history(order_id,new_status) "+
+        "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),'new')")
+        .bind(u.id,botKey)
     ];
+    let oid;
     try {
-      await db.batch(statements);
-    } catch (error) {
-      // No partial inventory change can commit on a failed D1 batch.
-      // Remove the uncommitted order header; its contact data must not be
-      // retained for an order that never actually existed.
-      const cleanup=await run(db,
-        "DELETE FROM orders WHERE id=? AND status='new' "+
-        "AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?)",oid,oid);
-      if(cleanup.meta.changes===0)await run(db,
-        "UPDATE orders SET contact_name='',contact_phone='',delivery_address='' "+
-        "WHERE id=? AND status='new' AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?)",oid,oid);
+      const results=await db.batch(statements);
+      oid=Number(results[0]?.meta?.last_row_id||0);
+      if(!oid){
+        const saved=await first(db,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,botKey);
+        oid=saved?.order_id;
+      }
+    } catch {
+      // All statements (including the contact data) rolled back together.
       await send(id,"Склад или корзина изменились. Заказ не оформлен, позиции в корзине сохранены.");
       return;
     }
+    if(!oid)throw new Error("Committed order ID unavailable");
     await send(id,"Тестовый заказ №"+oid+" создан. Оплата не проводилась.");
     await notify("Новый демо-заказ №"+oid+" (каталог), сумма "+rub(total)+"\n/admin — управление");
   }

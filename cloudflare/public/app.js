@@ -1,3 +1,4 @@
+import {productCountLabel, syncTelegramBackButton, configureTelegramBackNavigation} from "./ui-helpers.js";
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
 const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
@@ -22,6 +23,7 @@ const canUse=()=>Boolean(state.me?.admin||(!state.me?.demo&&state.me?.user));
 function go(view){
   if(view==="admin"&&!state.me?.admin){toast("Управление доступно только администратору",true);return}
   state.view=view;
+  syncTelegramBackButton(app,view);
   document.body.classList.toggle("is-inner-view",view!=="catalog");
   document.querySelectorAll(".view").forEach(e=>e.classList.toggle("active",e.id==="view-"+view));
   document.querySelectorAll("[data-view]").forEach(e=>{
@@ -36,7 +38,7 @@ function go(view){
 const categoryName=id=>state.catalog?.categories?.find(c=>c.id===id)?.name||"Коллекция";
 async function loadCatalog(){
   state.catalog=await api("/api/catalog");
-  $("product-count").textContent=(state.catalog.products.length||0)+" изделий";
+  $("product-count").textContent=productCountLabel(state.catalog.products.length);
   const categories=[{id:0,name:"Всё"},...state.catalog.categories];
   $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
   renderProducts();
@@ -233,6 +235,8 @@ async function saveEditor(e){
   finally{$("editor-save").disabled=false}
 }
 async function init(){
+  configureTelegramBackNavigation(app,go);
+  syncTelegramBackButton(app,state.view);
   document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>go(b.dataset.view)));
   $("explore").addEventListener("click",()=>go("catalog"));
   $("cart-top").addEventListener("click",()=>go("cart"));

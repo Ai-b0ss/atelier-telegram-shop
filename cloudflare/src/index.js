@@ -535,7 +535,9 @@ export default {
   async scheduled(event,env,ctx){
     if(!env.DB)return;
     await deliverOutbox(env);
-    if(event.cron==="*/5 * * * *")return;
+    // Workers Free limits cron triggers per account, so one schedule also runs the daily cleanup.
+    const now=new Date(event.scheduledTime);
+    if(event.cron&&!(now.getUTCHours()===2&&now.getUTCMinutes()===15))return;
     // Bounded retention for technical metadata; customer orders are preserved.
     await env.DB.batch([
       env.DB.prepare("DELETE FROM processed_updates WHERE processed_at < datetime('now','-14 days')"),

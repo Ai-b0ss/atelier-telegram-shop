@@ -18,7 +18,7 @@ function makeInitData(id=777,date=Math.floor(Date.now()/1000)){
 }
 function localDB(){
   const db=new DatabaseSync(":memory:");
-  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql"]){
+  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql"]){
     db.exec(readFileSync(new URL("../"+file,import.meta.url),"utf8"));
   }
   return {

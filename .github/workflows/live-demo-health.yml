@@ -1,0 +1,30 @@
+name: Live demo health (read-only)
+
+on:
+  push:
+    paths:
+      - 'scripts/check_cloud_demo.py'
+      - '.github/workflows/live-demo-health.yml'
+  pull_request:
+    paths:
+      - 'scripts/check_cloud_demo.py'
+      - '.github/workflows/live-demo-health.yml'
+  workflow_dispatch:
+  # Scheduled runs start only after this workflow enters the default branch.
+  schedule:
+    - cron: '23 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  check-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Live Cloudflare HTTP and privacy checks (GET only)
+        run: python scripts/check_cloud_demo.py

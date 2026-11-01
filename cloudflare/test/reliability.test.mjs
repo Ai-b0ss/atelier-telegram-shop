@@ -162,10 +162,15 @@ test("model-based sequences preserve user isolation, stock, orders and idempoten
               const duplicate=await call(env,777,"/api/admin/order/status","POST",{id:o.id,status:"canceled"});
               assert.equal(duplicate.status,409,"second cancellation must fail");
             }
-          }else{ // seller archives/restores a variant
+          }else if(action<97){ // seller archives/restores a variant
             record.action="toggle-active";
             model.active[variant]=!model.active[variant];
             raw.prepare("UPDATE variants SET active=? WHERE id=?").run(model.active[variant]?1:0,variant+1);
+          }else{ // continuously probe the role boundary alongside business flows
+            record.action="admin-auth-boundary";
+            const dashboard=await call(env,buyer,"/api/admin/dashboard");
+            assert.equal(dashboard.status,buyer===777?200:403,
+              "a non-admin must never gain access to another user's order history");
           }
           trace.push(record);
           assertInvariants(raw,model,trace,seed);

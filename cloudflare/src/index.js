@@ -76,18 +76,31 @@ export function makeHandler(env) {
     const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,data.name,data.phone,addr);
     const oid=ins.meta.last_row_id;
     if(!oid)throw new Error("Order ID unavailable");
-    const statements=items.map(x=>db.prepare("UPDATE variants SET stock=stock-? WHERE id=? AND stock>=?").bind(x.quantity,x.variant_id,x.quantity));
-    const results=await db.batch(statements);
-    if(results.some(v=>v.meta?.changes!==1)) {
-      await run(db,"UPDATE orders SET status='canceled' WHERE id=?",oid);
-      await send(id,"Склад изменился. Заказ отменён, обратитесь к администратору.");
-      return;
-    }
-    await db.batch([
-      ...items.map(x=>db.prepare("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)").bind(oid,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
+    // D1 batch() is atomic. A constraint failure rolls back *all* stock
+    // deductions, order items, cart removal and status history together.
+    // The variants CHECK(stock >= 0) is the concurrency guard: unlike a
+    // conditional WHERE stock>=?, it fails the transaction on a sold-out SKU.
+    const statements=[
+      ...items.map(x=>db.prepare(
+        "UPDATE variants SET stock=CASE WHEN active=1 AND EXISTS("+
+        "SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1"+
+        ") THEN stock-? ELSE -1 END WHERE id=?"
+      ).bind(x.quantity,x.variant_id)),
+      ...items.map(x=>db.prepare(
+        "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)"
+      ).bind(oid,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
       db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
       db.prepare("INSERT INTO status_history(order_id,new_status) VALUES(?,'new')").bind(oid)
-    ]);
+    ];
+    try {
+      await db.batch(statements);
+    } catch (error) {
+      // No partial inventory change can commit on a failed D1 batch.
+      // Keep the cart so the buyer can retry with updated availability.
+      await run(db,"UPDATE orders SET status='canceled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='new'",oid);
+      await send(id,"Склад изменился. Заказ отменён, позиции в корзине сохранены.");
+      return;
+    }
     await send(id,"Тестовый заказ №"+oid+" создан. Оплата не проводилась.");
     await notify("Новый демо-заказ №"+oid+" (каталог), сумма "+rub(total)+"\n/admin — управление");
   }
@@ -106,14 +119,23 @@ export function makeHandler(env) {
     if(s.flow==="checkout"){
       if(s.step==="name"){d.name=v.slice(0,160);await setSession(id,"checkout","phone",d);await send(id,"Укажите телефон или другой контакт:");return true}
       if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"checkout","address",d);await send(id,"Адрес доставки или «самовывоз»:");return true}
-      if(s.step==="address"){await delSession(id);await checkout(id,u,d,v.slice(0,300));return true}
+      if(s.step==="address"){
+        // Only one final message may consume this checkout session.
+        const claim=await run(db,"DELETE FROM sessions WHERE telegram_id=? AND flow='checkout' AND step='address'",id);
+        if(claim.meta.changes!==1)return true;
+        await checkout(id,u,d,v.slice(0,300));return true
+      }
     }
     if(s.flow==="custom"){
       if(s.step==="details"){if(v.length<10){await send(id,"Описание должно содержать не меньше 10 символов.");return true}d.details=v;await setSession(id,"custom","measures",d);await send(id,"Укажите мерки или «нужна консультация»:");return true}
       if(s.step==="measures"){d.measures=v;await setSession(id,"custom","name",d);await send(id,"Ваше имя:");return true}
       if(s.step==="name"){d.name=v.slice(0,160);await setSession(id,"custom","phone",d);await send(id,"Контактный телефон или Telegram:");return true}
       if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"custom","address",d);await send(id,"Город и способ получения:");return true}
-      if(s.step==="address"){await delSession(id);await createCustom(id,u,d,v.slice(0,300));return true}
+      if(s.step==="address"){
+        const claim=await run(db,"DELETE FROM sessions WHERE telegram_id=? AND flow='custom' AND step='address'",id);
+        if(claim.meta.changes!==1)return true;
+        await createCustom(id,u,d,v.slice(0,300));return true
+      }
     }
     await delSession(id);return false;
   }
@@ -177,7 +199,8 @@ export function makeHandler(env) {
       const o=await first(db,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",oid);
       if(!o||o.kind!=="custom"||o.status!=="new")return send(id,"Заявка недоступна для сметы.");
       const revision=o.quote_revision+1;
-      await run(db,"UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND quote_revision=?",price,cost,revision,oid,o.quote_revision);
+      const applied=await run(db,"UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND quote_revision=? AND status='new'",price,cost,revision,oid,o.quote_revision);
+      if(applied.meta.changes!==1)return send(id,"Смета не отправлена: заявка уже изменилась. Проверьте /order "+oid+" и повторите /quote.");
       await send(id,"Смета №"+oid+": "+rub(price)+", себестоимость "+rub(cost));
       try{await send(o.telegram_id,"Предложение по индивидуальному заказу №"+oid+": "+rub(price)+". Подтвердите цену:",kb([
         ["Согласен с ценой","qa:"+oid+":"+revision+":"+price],["Отменить заявку","qr:"+oid+":"+revision+":"+price]

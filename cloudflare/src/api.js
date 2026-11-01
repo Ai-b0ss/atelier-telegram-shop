@@ -61,14 +61,23 @@ export async function handleApi(request,env,url){
     const b=await safeBody(request),variantId=integer(b.variantId),delta=integer(Math.abs(b.delta),1,20);
     if(!variantId||!delta||![1,-1].includes(b.delta))return err("Invalid cart item");
     const c=await getCustomer(env.DB,u);
+    const current=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+    // A product may become inactive while it sits in an existing cart.
+    // Never trap a customer with an unremovable item: deletions do not
+    // require the variant or its parent product to remain on sale.
+    if(b.delta===-1){
+      if(!current)return json({ok:true,quantity:0});
+      const quantity=current.quantity-1;
+      if(quantity===0)await run(env.DB,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+      else await run(env.DB,"UPDATE cart_items SET quantity=? WHERE customer_id=? AND variant_id=?",quantity,c.id,variantId);
+      return json({ok:true,quantity});
+    }
     const v=await first(env.DB,"SELECT v.stock,v.active,p.active AS product_active FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?",variantId);
     if(!v||!v.active||!v.product_active)return err("Unavailable variant",404);
-    const current=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
-    const q=(current?.quantity||0)+b.delta;
+    const q=(current?.quantity||0)+1;
     if(q>v.stock)return err("Insufficient stock",409);
-    if(q<=0)await run(env.DB,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
-    else await run(env.DB,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,?) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=excluded.quantity",c.id,variantId,q);
-    return json({ok:true,quantity:Math.max(0,q)});
+    await run(env.DB,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,?) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=excluded.quantity",c.id,variantId,q);
+    return json({ok:true,quantity:q});
   }
   if(request.method==="POST"&&path==="/api/checkout"){
     const b=await safeBody(request),requestKey=text(b.requestKey,64);

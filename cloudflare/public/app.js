@@ -235,6 +235,15 @@ async function saveEditor(e){
   finally{$("editor-save").disabled=false}
 }
 async function init(){
+  // Focus events work even in embedded WebViews where CSS :focus can be
+  // temporarily out of sync with document.activeElement.
+  const isEditingField=e=>e?.matches?.('input:not([type="hidden"]),textarea,select');
+  document.addEventListener("focusin",e=>{
+    if(isEditingField(e.target))document.body.classList.add("is-editing-field");
+  });
+  document.addEventListener("focusout",e=>{
+    if(!isEditingField(e.relatedTarget))document.body.classList.remove("is-editing-field");
+  });
   configureTelegramBackNavigation(app,go);
   syncTelegramBackButton(app,state.view);
   document.querySelectorAll("[data-view]").forEach(b=>b.addEventListener("click",()=>go(b.dataset.view)));

@@ -239,9 +239,9 @@ export async function handleApi(request,env,url){
     const product=await first(env.DB,"SELECT id,name FROM products WHERE id=? AND active=1",productId);
     if(!product)return err("Товар не найден",404);
     const c=await getCustomer(env.DB,u);
-    // A second review of the same product replaces the first and is published again.
+    // A repeat review replaces the first; one hidden by an administrator stays hidden.
     await run(env.DB,"INSERT INTO reviews(product_id,customer_id,author_name,rating,body) VALUES(?,?,?,?,?) "+
-      "ON CONFLICT(product_id,customer_id) DO UPDATE SET author_name=excluded.author_name,rating=excluded.rating,body=excluded.body,hidden=0,updated_at=CURRENT_TIMESTAMP",
+      "ON CONFLICT(product_id,customer_id) DO UPDATE SET author_name=excluded.author_name,rating=excluded.rating,body=excluded.body,updated_at=CURRENT_TIMESTAMP",
       productId,c.id,text(u.first_name,40)||"Покупатель",rating,body);
     for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>x.trim()).filter(Boolean)){
       try{await telegramSend(env,adminId,"Новый отзыв на «"+product.name+"», оценка "+rating+":\n"+body)}catch{}

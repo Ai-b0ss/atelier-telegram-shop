@@ -34,6 +34,7 @@ const HELP="Что можно сделать:\n\n/catalog — посмотрет
 const MENU={"🛍 Каталог":"catalog","🧺 Корзина":"cart","✂️ Пошив":"custom","📦 Мои заказы":"orders","⭐ Отзывы":"reviews","💬 Менеджер":"manager","❓ Помощь":"help"};
 const MENU_KEYBOARD={keyboard:[["🛍 Каталог","🧺 Корзина"],["✂️ Пошив","📦 Мои заказы"],["⭐ Отзывы","💬 Менеджер"],["❓ Помощь"]].map(row=>row.map(text=>({text}))),
   resize_keyboard:true,is_persistent:true,input_field_placeholder:"Выберите раздел внизу"};
+const AVATAR_VERSION="signature-1";
 const chatPhoto=path=>SHOP+String(path).replace(/\.webp$/,".jpg");
 const firstImage=p=>{try{return JSON.parse(p.images||"[]")[0]||null}catch{return null}};
 export function makeHandler(env) {
@@ -90,6 +91,24 @@ export function makeHandler(env) {
     if(!list.length)return send(id,"Отзывов пока нет. Ваш может быть первым.",markup);
     return send(id,list.map(x=>"★".repeat(x.rating)+" "+x.name+"\n"+x.body+"\n— "+x.author_name).join("\n\n"),markup);
   }
+  async function uploadAvatar(){
+    const image=await env.ASSETS.fetch(new Request(SHOP+"/brand/avatar.jpg"));
+    if(!image.ok)throw new Error("Avatar asset missing");
+    const body=new FormData();
+    body.append("photo",JSON.stringify({type:"static",photo:"attach://avatar"}));
+    body.append("avatar",new Blob([await image.arrayBuffer()],{type:"image/jpeg"}),"avatar.jpg");
+    const r=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/setMyProfilePhoto",{method:"POST",body});
+    const result=await r.json().catch(()=>null);
+    if(!r.ok||result?.ok!==true)throw new Error(result?.description||"Avatar rejected");
+  }
+  // Raise AVATAR_VERSION after replacing the file: the schedule then applies it once, with no command.
+  async function syncAvatar(){
+    if(!env.ASSETS||!env.BOT_TOKEN)return;
+    const done=await first(db,"SELECT file_id FROM photo_cache WHERE path=?","avatar:version");
+    if(done?.file_id===AVATAR_VERSION)return;
+    await uploadAvatar();
+    await run(db,"INSERT INTO photo_cache(path,file_id) VALUES('avatar:version',?) ON CONFLICT(path) DO UPDATE SET file_id=excluded.file_id",AVATAR_VERSION);
+  }
   // Bot profile settings live in Telegram, so they are applied from here where the token is available.
   async function setupBot(){
     const steps=[
@@ -97,16 +116,7 @@ export function makeHandler(env) {
       ["описание",()=>api("setMyDescription",{description:"Авторская одежда и пошив по вашей идее. Самовывоз у метро Беляево, детали с менеджером в Telegram. Нажмите «Старт»."})],
       ["короткое описание",()=>api("setMyShortDescription",{short_description:"Авторская одежда и пошив. Самовывоз у метро Беляево."})],
       ["кнопка витрины",()=>api("setChatMenuButton",{menu_button:{type:"web_app",text:"Витрина",web_app:{url:SHOP+"/app"}}})],
-      ["аватарка",async()=>{
-        const image=await env.ASSETS.fetch(new Request(SHOP+"/brand/avatar.jpg"));
-        if(!image.ok)throw new Error("Avatar asset missing");
-        const body=new FormData();
-        body.append("photo",JSON.stringify({type:"static",photo:"attach://avatar"}));
-        body.append("avatar",new Blob([await image.arrayBuffer()],{type:"image/jpeg"}),"avatar.jpg");
-        const r=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/setMyProfilePhoto",{method:"POST",body});
-        const result=await r.json().catch(()=>null);
-        if(!r.ok||result?.ok!==true)throw new Error(result?.description||"Avatar rejected");
-      }]
+      ["аватарка",uploadAvatar]
     ];
     const report=[];
     for(const [name,step] of steps){
@@ -548,6 +558,7 @@ export function makeHandler(env) {
     return send(id,"Не понял сообщение. Все команды: /help");
   }
   return {
+    syncAvatar,
     async handle(update) {
       if(!env.BOT_TOKEN||!env.DB||!env.WEBHOOK_SECRET)throw new Error("Worker secrets or D1 missing");
       if(!Number.isSafeInteger(update?.update_id))return;
@@ -671,6 +682,7 @@ export default {
   async scheduled(event,env,ctx){
     if(!env.DB)return;
     await deliverOutbox(env);
+    try{await makeHandler(env).syncAvatar()}catch{console.warn("Avatar update deferred")}
     // Workers Free limits cron triggers per account, so one schedule also runs the daily cleanup.
     const now=new Date(event.scheduledTime);
     if(event.cron&&!(now.getUTCHours()===2&&now.getUTCMinutes()===15))return;

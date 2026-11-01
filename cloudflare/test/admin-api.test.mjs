@@ -528,6 +528,8 @@ test("customers review a product once, abuse can be hidden and anyone can read",
     assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},buyer)).status,403);
     assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},makeInitData(100))).status,200);
     assert.equal((await read()).length,0);
+    assert.equal((await post({productId:product,rating:5,text:"Снова тот же текст"})).status,200);
+    assert.equal((await read()).length,0,"a hidden review stays hidden when resubmitted");
   }finally{globalThis.fetch=original}
 });
 

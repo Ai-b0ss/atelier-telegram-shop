@@ -51,7 +51,7 @@ try{
   const link=await evaluate('(()=>{window.__qaLink=null;window.open=(url)=>{window.__qaLink=url;return null;};if(window.Telegram?.WebApp){try{window.Telegram.WebApp.openTelegramLink=(url)=>{window.__qaLink=url;};}catch{}}document.querySelector(".add-button")?.click();return window.__qaLink;})()');
   const ok=state?.viewport===width&&state?.scrollWidth<=width+1&&state?.products===3&&state?.bottomNavVisible&&state?.firstCardRight<=width+1&&state?.buttonHeights.length>=10&&state?.buttonHeights.every(h=>h>=44)&&filtered?.count===1&&filtered?.title==='Футболка с принтом'&&nav?.hidden===true&&nav?.restored===true&&keyboard?.hidden===true&&keyboard?.restored===true&&brokenPhoto===true&&link==='https://t.me/atelier_customwear_2611_bot'&&exceptions.length===0;
   report.push({width,ok,state,filtered,link,nav,keyboard,brokenPhoto,exceptions});
-  console.log(JSON.stringify({width,ok,scrollWidth:state?.scrollWidth,products:state?.products,filtered:filtered?.count,link,nav,firstCardRight:state?.firstCardRight,viewport:state?.viewport,minButton:Math.min(...(state?.buttonHeights??[])),exceptions}));
+  console.log(JSON.stringify({width,ok,scrollWidth:state?.scrollWidth,products:state?.products,filtered:filtered?.count,link,nav,keyboard,brokenPhoto,firstCardRight:state?.firstCardRight,viewport:state?.viewport,minButton:Math.min(...(state?.buttonHeights??[])),exceptions}));
  }
  writeFileSync(join(dir,'report.json'),JSON.stringify(report,null,2),'utf8');
  if(report.some(x=>!x.ok))process.exitCode=1;

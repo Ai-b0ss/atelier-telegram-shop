@@ -2,7 +2,7 @@
 
 **Назначение:** Telegram-магазин авторской одежды: каталог/корзина/заказы/индивидуальные заявки, ручной финансовый учёт, Excel.
 
-**Состояние на 31 октября 2026 года:** публичный GitHub-репозиторий https://github.com/Ai-b0ss/atelier-telegram-shop опубликован. Ветка main, история сохранена. На Windows созданы виртуальное окружение и локальная копия; 45 тестов, импорт aiogram и генерация демонстрационного Excel прошли. GitHub Actions (Python 3.11, 3.12, 3.13) прошли на повторном запуске после перевода репозитория в публичный. Telegram-бот создан, токен настроен локально, активна демонстрационная сессия на Windows. Боевой/круглосуточный хостинг пока не настроен.
+**Состояние на 31 октября 2026 года:** публичный GitHub-репозиторий https://github.com/Ai-b0ss/atelier-telegram-shop опубликован. Ветка main, история сохранена. На Windows созданы виртуальное окружение и локальная копия; 45 тестов, импорт aiogram и генерация демонстрационного Excel прошли. GitHub Actions (Python 3.11, 3.12, 3.13) прошли на повторном запуске после перевода репозитория в публичный. Telegram-бот создан, демонстрационный хостинг перенесён в Cloudflare Workers + D1; эксплуатация с настоящими клиентами пока не разрешена.
 
 ## Структура
 
@@ -49,20 +49,28 @@ GitHub-публикация завершена. Далее выполнить р
 
 При остановке Windows Task Scheduler дочерние процессы бота раньше оставались сиротами. Исправлено через `atelier/windows_job.py` (Job Object / KILL_ON_JOB_CLOSE), проверено реальным stop/start задания: после остановки не осталось ни одного polling-процесса.
 
-## Cloudflare Workers / D1 (1 ноября 2026)
+## Облачная версия Cloudflare / D1 (1 ноября 2026)
 
-- `cloudflare/` — самостоятельная серверная реализация на JS с D1 и Telegram webhook,
-  а не перенос SQLite-файла/Python процесса как есть.
-- Worker `atelier-customwear-demo-2026` опубликован:
+- [Бот](https://t.me/atelier_customwear_2611_bot) работает через
+  Cloudflare Workers webhook, независимо от локального ПК.
+- Worker: `atelier-customwear-demo-2026`,
   https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev/health.
-- Отдельная D1 с SQL схемой и **синтетическими** товарами создана и проверена.
-- Node 24: интеграционный тест webhook → каталог/заказ/отмена/статусы/смета/XLSX
-  выполнен с тестовой базой SQLite и имитацией Telegram Bot API.
-- Проверено реальное HTTPS: `/health` 200, отсутствие webhook секретного заголовка → 403.
-- **Cloudflare Secrets ещё НЕ настроены**; Telegram webhook ещё НЕ переключён.
-  Windows-процесс остался рабочим; не объявлять миграцию завершённой.
-- Попытка автоматической передачи локального токена в Cloudflare
-  заблокирована системой безопасности. Не обходить блокировку и не публиковать секрет.
-- Следующий шаг: безопасно задать Cloudflare secrets, остановить Windows polling,
-  включить Telegram webhook, проверить живое взаимодействие, только затем считать хостинг завершённым.
-- D1 не содержит истории заказов с Windows и не синхронизирует местные изменения каталога.
+- D1: `atelier-customwear-demo-2026`, каталог демонстрационный; Windows SQLite
+  не переносилась, синхронизации нет.
+- Секреты `BOT_TOKEN`, `ADMIN_IDS`, `WEBHOOK_SECRET` переданы по HTTPS
+  через stdin штатного Wrangler командой `secret bulk`, только из памяти
+  локального процесса; названия подтверждены (3/3), значения не печатались.
+- Telegram `getWebhookInfo` подтвердил URL. Живой `/start` и `/report`
+  из Telegram Desktop дали ответы и XLSX после отключения локального polling.
+  Финальная проверка: `CLOUD_WORKER_OK`, `TELEGRAM_WEBHOOK_ACTIVE`,
+  `PENDING_UPDATES 0`. Ошибок webhook нет.
+- Windows Scheduled Task `AtelierTelegramDemo` остановлен и **Disabled**,
+  чтобы при входе в Windows не возобновлялся polling.
+- Скрипты: `scripts/sync-cloudflare-secrets.py`,
+  `scripts/cutover-cloudflare.py`, `scripts/verify-cloudflare.py`,
+  `scripts/rollback-cloudflare.py` (аварийный ручной возврат).
+- Node 24 integration test в `cloudflare/test/integration.test.mjs`
+  включает заказ/отмену/восстановление остатков/смету/XLSX.
+- **Демо, не реальная торговля:** администратор только один, настоящий каталог,
+  независимая двухпользовательская приёмка, хранение ПД и боевые платежи
+  остаются незавершёнными.

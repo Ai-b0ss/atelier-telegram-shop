@@ -53,15 +53,22 @@ SQLite-снимки каждые 6 часов. Во время проверки 
 
 **Не проводить реальные платежи ради теста.** `/payment` лишь отражает факт поступления, проверенный менеджером, и не принимает деньги.
 
-## Cloudflare webhook-хостинг
+## Облачный Telegram-хостинг — действует
 
-Инфраструктура подготовлена в `cloudflare/`: публичный Worker, D1 и шаблоны
-развёртывания. Сейчас Cloudflare не принимает обновления от Telegram:
-`BOT_TOKEN`, `ADMIN_IDS`, `WEBHOOK_SECRET` не переданы в Worker Secrets.
-Локальный polling оставлен работающим, чтобы не потерять доступность бота.
-Переключение требует завершения секретной настройки и проверки `getWebhookInfo`.
-Не путать доступность `/health` с полноценным переключением Telegram.
-Подробнее: [Cloudflare README](../cloudflare/README.md).
+Текущий `@atelier_customwear_2611_bot` использует Cloudflare Worker + D1.
+Включён webhook на
+`https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev/webhook`
+с отдельным секретным заголовком. Секреты подготовлены локально без копирования
+в чат и загружены в Cloudflare Workers Secrets через stdin Wrangler.
+
+Фактически подтверждены `/start` и `/report` из Telegram Desktop,
+полученный XLSX, адрес webhook, отсутствие ошибок доставки и
+`PENDING_UPDATES 0`. Windows-задача отключена, иначе автоматический запуск
+polling после входа в Windows создавал бы конфликт с webhook.
+
+Для проверки использовать `scripts/verify-cloudflare.py`, для ручного
+аварийного возврата на Windows — `scripts/rollback-cloudflare.py`.
+Подробнее в [инструкции Cloudflare](../cloudflare/README.md).
 
 ## Эксплуатационные ограничения
 

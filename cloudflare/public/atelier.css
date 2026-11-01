@@ -85,7 +85,7 @@ body.is-inner-view .section-heading{margin-top:12px}
 @keyframes sew{from{stroke-dashoffset:1}to{stroke-dashoffset:0}}
 .primary{position:relative}
 .primary:after{content:"";position:absolute;inset:4px;border:1px dashed #e0693f;border-radius:999px;pointer-events:none;opacity:.85}
-.gallery{position:relative;background:#e4dfd3}
+.sheet-photo.gallery{position:relative;aspect-ratio:4/5;background:#e4dfd3}
 .gallery-track{display:flex;height:100%;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch}
 .gallery-track::-webkit-scrollbar{display:none}
 .gallery-slide{position:relative;flex:0 0 100%;scroll-snap-align:start}

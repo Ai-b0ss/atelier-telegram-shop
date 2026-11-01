@@ -1,0 +1,232 @@
+import {verifyTelegramInitData,isAdmin,demoMode} from "./auth.js";
+
+const json=(data,status=200)=>Response.json(data,{status,headers:{"cache-control":"no-store","x-content-type-options":"nosniff"}});
+const err=(message,status=400)=>json({ok:false,error:message},status);
+const first=(db,sql,...values)=>db.prepare(sql).bind(...values).first();
+const rows=async(db,sql,...values)=>(await db.prepare(sql).bind(...values).all()).results||[];
+const run=(db,sql,...values)=>db.prepare(sql).bind(...values).run();
+const integer=(v,min=1,max=2147483647)=>Number.isSafeInteger(Number(v))&&Number(v)>=min&&Number(v)<=max?Number(v):null;
+const text=(x,max)=>typeof x==="string"?x.trim().slice(0,max):"";
+const money=(x)=>Number.isSafeInteger(x)&&x>=0&&x<=1e11?x:null;
+const statusTransitions={
+  new:["confirmed","canceled"],confirmed:["in_production","ready","canceled"],
+  in_production:["ready","canceled"],ready:["shipped","completed","canceled"],
+  shipped:["completed","canceled"],completed:[],canceled:[]
+};
+const escaped=(e)=>e?.message||"error";
+function safeBody(request){
+  return request.json().then(value=>{
+    if(!value||Array.isArray(value)||typeof value!=="object")throw Error("Invalid JSON body");
+    return value;
+  });
+}
+async function getCustomer(db,u){
+  await run(db,"INSERT INTO customers(telegram_id,full_name,username) VALUES(?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name,username=excluded.username",
+    u.id,text(u.first_name,80),text(u.username,80));
+  return first(db,"SELECT id FROM customers WHERE telegram_id=?",u.id);
+}
+async function telegramSend(env,chatId,message,replyMarkup){
+  const response=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/sendMessage",{
+    method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({chat_id:chatId,text:message,...(replyMarkup?{reply_markup:replyMarkup}:{})})
+  });
+  if(!response.ok)throw Error("Telegram delivery unsuccessful");
+  const out=await response.json();
+  if(out.ok!==true)throw Error("Telegram delivery rejected");
+}
+export async function handleApi(request,env,url){
+  if(!env.DB||!env.BOT_TOKEN)return err("Service unavailable",503);
+  const path=url.pathname;
+  if(request.method==="GET"&&path==="/api/catalog"){
+    const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
+    const products=await rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,CASE WHEN p.photo_file_id IS NOT NULL AND p.photo_file_id<>'' THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY p.id LIMIT 150");
+    const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600");
+    return json({ok:true,demo:demoMode(env),categories,products,variants});
+  }
+  const auth=request.headers.get("Authorization")||"";
+  if(!auth.startsWith("tma "))return err("Open via Telegram",401);
+  const u=await verifyTelegramInitData(auth.slice(4),env.BOT_TOKEN);
+  if(!u)return err("Invalid Telegram authorization",401);
+  const admin=isAdmin(env,u.id);
+  if(request.method==="GET"&&path==="/api/me")return json({ok:true,user:{id:u.id,name:u.first_name},admin,demo:demoMode(env)});
+  if(demoMode(env)&&!admin)return err("Demo mode: administrator only",403);
+  if(path.startsWith("/api/admin/")&&!admin)return err("Administrator only",403);
+
+  if(request.method==="GET"&&path==="/api/cart"){
+    const c=await getCustomer(env.DB,u);
+    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.name FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
+    return json({ok:true,items,total_cents:items.reduce((n,x)=>n+x.quantity*x.price_cents,0)});
+  }
+  if(request.method==="POST"&&path==="/api/cart"){
+    const b=await safeBody(request),variantId=integer(b.variantId),delta=integer(Math.abs(b.delta),1,20);
+    if(!variantId||!delta||![1,-1].includes(b.delta))return err("Invalid cart item");
+    const c=await getCustomer(env.DB,u);
+    const v=await first(env.DB,"SELECT v.stock,v.active,p.active AS product_active FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?",variantId);
+    if(!v||!v.active||!v.product_active)return err("Unavailable variant",404);
+    const current=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+    const q=(current?.quantity||0)+b.delta;
+    if(q>v.stock)return err("Insufficient stock",409);
+    if(q<=0)await run(env.DB,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+    else await run(env.DB,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,?) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=excluded.quantity",c.id,variantId,q);
+    return json({ok:true,quantity:Math.max(0,q)});
+  }
+  if(request.method==="POST"&&path==="/api/checkout"){
+    const b=await safeBody(request),requestKey=text(b.requestKey,64);
+    const name=text(b.name,120),phone=text(b.phone,120),address=text(b.address,300);
+    if(!/^[a-zA-Z0-9_-]{16,64}$/.test(requestKey)||name.length<2||phone.length<3||address.length<3)
+      return err("Fill in name, contact and delivery method");
+    const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+    if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
+    const c=await getCustomer(env.DB,u);
+    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
+    if(!items.length||items.some(x=>x.stock<x.quantity))return err("Cart empty or stock changed",409);
+    const total=items.reduce((n,x)=>n+x.price_cents*x.quantity,0);
+    const cost=items.reduce((n,x)=>n+x.cost_cents*x.quantity,0);
+    const result=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,total_cents,cost_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','new',?,?,?,?,?)",c.id,total,cost,name,phone,address);
+    const orderId=result.meta.last_row_id;
+    try{
+      await env.DB.batch([
+        dbStatement(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,orderId),
+        ...items.map(x=>dbStatement(env.DB,
+          "UPDATE variants SET stock=CASE WHEN active=1 AND EXISTS(SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1) THEN stock-? ELSE -1 END WHERE id=?",
+          x.quantity,x.variant_id)),
+        ...items.map(x=>dbStatement(env.DB,"INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)",
+          orderId,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
+        dbStatement(env.DB,"DELETE FROM cart_items WHERE customer_id=?",c.id),
+        dbStatement(env.DB,"INSERT INTO status_history(order_id,new_status) VALUES(?,'new')",orderId)
+      ]);
+    }catch{
+      await run(env.DB,"UPDATE orders SET status='canceled' WHERE id=? AND status='new'",orderId);
+      const found=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+      if(found)return json({ok:true,orderId:found.order_id,duplicate:true});
+      return err("Stock changed during checkout. Your cart is preserved.",409);
+    }
+    try{await telegramSend(env,u.id,"Демо-заказ №"+orderId+" оформлен. Оплата не проводилась.");}catch{}
+    for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
+      if(adminId===u.id)continue;
+      try{await telegramSend(env,adminId,"Новый тестовый заказ из Mini App №"+orderId+"; сумма "+(total/100).toFixed(2)+" ₽.");}catch{}
+    }
+    return json({ok:true,orderId});
+  }
+  if(request.method==="POST"&&path==="/api/custom"){
+    const b=await safeBody(request),requestKey=text(b.requestKey,64);
+    const description=text(b.description,2500),measurements=text(b.measurements,2000),
+      name=text(b.name,120),phone=text(b.phone,120),address=text(b.address,300);
+    if(!/^[a-zA-Z0-9_-]{16,64}$/.test(requestKey)||description.length<10||
+       name.length<2||phone.length<3||measurements.length<3||address.length<3)
+      return err("Complete the tailoring request");
+    const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+    if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
+    const c=await getCustomer(env.DB,u);
+    const ins=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)",
+      c.id,name,phone,address,description,measurements);
+    try{
+      await run(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,ins.meta.last_row_id);
+    }catch{
+      await run(env.DB,"UPDATE orders SET status='canceled' WHERE id=? AND status='new'",ins.meta.last_row_id);
+      const existing=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+      if(existing)return json({ok:true,orderId:existing.order_id,duplicate:true});
+      return err("Request could not be saved; retry",409);
+    }
+    for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
+      try{await telegramSend(env,adminId,"Новая тестовая заявка на индивидуальный пошив №"+ins.meta.last_row_id+" из Mini App.");}catch{}
+    }
+    return json({ok:true,orderId:ins.meta.last_row_id});
+  }
+  if(request.method==="GET"&&path==="/api/admin/dashboard"){
+    const products=await rows(env.DB,"SELECT p.id,p.name,p.description,p.category_id,p.active,p.photo_file_id,c.name AS category_name FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id LIMIT 200");
+    const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.sku,v.size,v.color,v.price_cents,v.cost_cents,v.stock,v.active FROM variants v ORDER BY v.id LIMIT 600");
+    const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
+    const settings=await first(env.DB,"SELECT * FROM store_settings WHERE id=1");
+    const orders=await rows(env.DB,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at,o.custom_details,o.custom_measurements,(SELECT COUNT(*) FROM custom_attachments a WHERE a.order_id=o.id) AS attachment_count,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC LIMIT 100");
+    const payments=await rows(env.DB,"SELECT kind,amount_cents FROM payments ORDER BY id DESC LIMIT 1000");
+    const net=payments.reduce((v,p)=>v+(p.kind==="received"?p.amount_cents:-p.amount_cents),0);
+    const completed=orders.filter(o=>o.status==="completed");
+    const metrics={
+      orderCount:orders.length,completedCount:completed.length,
+      bookedRevenueCents:orders.filter(o=>o.status!=="canceled").reduce((v,o)=>v+o.total_cents,0),
+      grossMarginCents:completed.reduce((v,o)=>v+o.total_cents-o.cost_cents,0),
+      paidNetCents:net,lowStockCount:variants.filter(v=>v.stock<=3&&v.active).length,
+      ordersByStatus:Object.fromEntries(["new","confirmed","in_production","ready","shipped","completed","canceled"].map(status=>[status,orders.filter(o=>o.status===status).length]))
+    };
+    return json({ok:true,metrics,orders,products,variants,categories,settings,demo:demoMode(env)});
+  }
+  if(request.method==="POST"&&path==="/api/admin/settings"){
+    const b=await safeBody(request);
+    const legalName=text(b.legalName,200),taxId=text(b.taxId,80),
+      supportContact=text(b.supportContact,180),pickupAddress=text(b.pickupAddress,350),
+      deliveryPolicy=text(b.deliveryPolicy,2500),returnPolicy=text(b.returnPolicy,2500),
+      privacyUrl=text(b.privacyUrl,500);
+    if(privacyUrl && !/^https:\/\/[^\s<>]+$/.test(privacyUrl))return err("Privacy URL must be HTTPS");
+    await run(env.DB,"UPDATE store_settings SET legal_name=?,tax_id=?,support_contact=?,pickup_address=?,delivery_policy=?,return_policy=?,privacy_policy_url=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",
+      legalName,taxId,supportContact,pickupAddress,deliveryPolicy,returnPolicy,privacyUrl);
+    return json({ok:true,readyForReview:Boolean(legalName&&taxId&&supportContact&&deliveryPolicy&&returnPolicy&&privacyUrl),
+      productionEnabled:!demoMode(env)});
+  }
+  if(request.method==="POST"&&path==="/api/admin/product"){
+    const b=await safeBody(request);
+    const categoryId=integer(b.categoryId),name=text(b.name,100),description=text(b.description,1000);
+    if(!categoryId||name.length<2)return err("Product name and category required");
+    const category=await first(env.DB,"SELECT id FROM categories WHERE id=?",categoryId);
+    if(!category)return err("Unknown category",404);
+    let itemId=integer(b.id);
+    if(itemId){
+      const changed=await run(env.DB,"UPDATE products SET name=?,description=?,category_id=?,active=? WHERE id=?",name,description,categoryId,b.active===false?0:1,itemId);
+      if(changed.meta.changes!==1)return err("Product not found",404);
+    }else{
+      const ins=await run(env.DB,"INSERT INTO products(category_id,name,description,active) VALUES(?,?,?,?)",categoryId,name,description,b.active===false?0:1);
+      itemId=ins.meta.last_row_id;
+    }
+    return json({ok:true,id:itemId});
+  }
+  if(request.method==="POST"&&path==="/api/admin/variant"){
+    const b=await safeBody(request),id=integer(b.id),productId=integer(b.productId),
+      price=money(b.priceCents),cost=money(b.costCents),stock=integer(b.stock,0,100000),
+      sku=text(b.sku,64),size=text(b.size,50),color=text(b.color,80);
+    if(!productId||price===null||cost===null||stock===null||sku.length<2||size.length<1||color.length<1)return err("Invalid variant");
+    if(!/^[a-zA-Z0-9_-]{2,64}$/.test(sku))return err("Invalid SKU");
+    const product=await first(env.DB,"SELECT id FROM products WHERE id=?",productId);
+    if(!product)return err("Product not found",404);
+    try{
+      let updated;
+      if(id){
+        updated=await run(env.DB,"UPDATE variants SET product_id=?,sku=?,size=?,color=?,price_cents=?,cost_cents=?,stock=?,active=? WHERE id=?",
+          productId,sku,size,color,price,cost,stock,b.active===false?0:1,id);
+        if(updated.meta.changes!==1)return err("Variant not found",404);
+      }else{
+        updated=await run(env.DB,"INSERT INTO variants(product_id,sku,size,color,price_cents,cost_cents,stock,active) VALUES(?,?,?,?,?,?,?,?)",
+          productId,sku,size,color,price,cost,stock,b.active===false?0:1);
+      }
+      return json({ok:true,id:id||updated.meta.last_row_id});
+    }catch{return err("SKU already exists or invalid",409)}
+  }
+  if(request.method==="POST"&&path==="/api/admin/order/status"){
+    const b=await safeBody(request),id=integer(b.id),status=text(b.status,32);
+    if(!id||!Object.hasOwn(statusTransitions,status))return err("Invalid order status");
+    const o=await first(env.DB,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",id);
+    if(!o)return err("Order not found",404);
+    if(!statusTransitions[o.status]?.includes(status))return err("Invalid transition",409);
+    const updated=await run(env.DB,
+      "UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=? AND ("+
+      "?!='canceled' OR COALESCE((SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) FROM payments WHERE order_id=?),0)<=0)",
+      status,id,o.status,status,id);
+    if(updated.meta.changes!==1)return err("Status or payments changed",409);
+    try{await telegramSend(env,o.telegram_id,"Статус заказа №"+id+": "+status);}catch{}
+    return json({ok:true,id,status});
+  }
+  if(request.method==="POST"&&path==="/api/admin/quote"){
+    const b=await safeBody(request),id=integer(b.id),price=money(b.priceCents),cost=money(b.costCents);
+    if(!id||price===null||price<100||cost===null)return err("Invalid quote");
+    const o=await first(env.DB,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",id);
+    if(!o||o.kind!=="custom"||o.status!=="new")return err("Tailoring request unavailable",409);
+    const version=o.quote_revision+1;
+    const updated=await run(env.DB,"UPDATE orders SET total_cents=?,cost_cents=?,quote_revision=? WHERE id=? AND quote_revision=? AND status='new'",price,cost,version,id,o.quote_revision);
+    if(updated.meta.changes!==1)return err("Quote already changed",409);
+    try{await telegramSend(env,o.telegram_id,"Смета по заявке №"+id+": "+(price/100).toFixed(2)+" ₽. Подтвердите или отклоните предложение.",{
+      inline_keyboard:[[{text:"Согласен",callback_data:"qa:"+id+":"+version+":"+price},{text:"Отклонить",callback_data:"qr:"+id+":"+version+":"+price}]]
+    });return json({ok:true,version,delivered:true})}
+    catch{return json({ok:true,version,delivered:false})}
+  }
+  return err("Not found",404);
+}
+function dbStatement(db,sql,...values){return db.prepare(sql).bind(...values)}

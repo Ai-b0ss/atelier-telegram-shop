@@ -1,4 +1,6 @@
 import { makeXlsx } from "./xlsx.js";
+import { handleApi } from "./api.js";
+import { demoMode } from "./auth.js";
 
 const statuses = ["new","confirmed","in_production","ready","shipped","completed","canceled"];
 const nextStatuses = {
@@ -9,7 +11,7 @@ const nextStatuses = {
 const ru={new:"Новый",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов",shipped:"Отправлен",completed:"Завершён",canceled:"Отменён"};
 const rub=n=>(Number(n||0)/100).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2})+" ₽";
 const adminIds=env=>new Set(String(env.ADMIN_IDS||"").split(",").map(s=>Number(s.trim())).filter(Number.isSafeInteger));
-const demo=env=>env.DEMO_MODE!=="0";
+const demo=demoMode;
 const rows=async(db,q,...values)=>(await db.prepare(q).bind(...values).all()).results||[];
 const first=async(db,q,...values)=>await db.prepare(q).bind(...values).first();
 const run=async(db,q,...values)=>await db.prepare(q).bind(...values).run();
@@ -47,9 +49,14 @@ export function makeHandler(env) {
     "INSERT INTO sessions(telegram_id,flow,step,payload) VALUES(?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET flow=excluded.flow,step=excluded.step,payload=excluded.payload,updated_at=CURRENT_TIMESTAMP",
     id,flow,step,JSON.stringify(data));
   const delSession=id=>run(db,"DELETE FROM sessions WHERE telegram_id=?",id);
-  const home=id=>send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Ателье авторской одежды. Выберите действие:",kb([
-    ["Каталог","cats"],["Корзина","cart"],["Индивидуальный пошив","custom"],["Мои заказы","mine"]
-  ]));
+  const home=id=>{
+    const buttons=kb([
+      ["Каталог","cats"],["Корзина","cart"],["Индивидуальный пошив","custom"],["Мои заказы","mine"]
+    ]);
+    buttons.inline_keyboard.unshift([{text:"Открыть Mini App — витрина ↗",
+      web_app:{url:"https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev/app"}}]);
+    return send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Ателье авторской одежды. Выберите действие:",buttons);
+  };
   async function catalogue(id) {
     const cs=await rows(db,"SELECT c.id,c.name,COUNT(p.id) AS items FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.active=1 GROUP BY c.id ORDER BY c.name");
     await send(id,"Категории:",kb([...cs.filter(c=>c.items>0).map(c=>[c.name+" ("+c.items+")","cat:"+c.id]),["Главное меню","home"]]));
@@ -108,8 +115,20 @@ export function makeHandler(env) {
     const c=await customer(u);
     const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)",
       c.id,data.name,data.phone,addr,data.details,data.measures);
-    await send(id,"Тестовая заявка на индивидуальный пошив №"+ins.meta.last_row_id+" получена. Цену и сроки согласует менеджер.");
-    await notify("Новая демо-заявка на пошив №"+ins.meta.last_row_id+". /admin");
+    const orderId=ins.meta.last_row_id;
+    const photos=Array.isArray(data.photos)?data.photos.slice(0,4):[];
+    if(photos.length){
+      await db.batch(photos.map(fileId=>db.prepare(
+        "INSERT OR IGNORE INTO custom_attachments(order_id,telegram_file_id) VALUES(?,?)").bind(orderId,fileId)));
+    }
+    await send(id,"Тестовая заявка на индивидуальный пошив №"+orderId+" получена. Цену и сроки согласует менеджер.");
+    await notify("Новая демо-заявка на пошив №"+orderId+"; референсов: "+photos.length+". /admin");
+    for(const admin of admins){
+      for(const fileId of photos){
+        try{await api("sendPhoto",{chat_id:admin,photo:fileId,caption:"Референс к заявке №"+orderId})}
+        catch{console.warn("Reference delivery failed")}
+      }
+    }
   }
   async function flowMessage(id,u,text){
     const s=await session(id);if(!s)return false;
@@ -146,13 +165,14 @@ export function makeHandler(env) {
       const outstanding=payments.reduce((sum,p)=>sum+(p.kind==="received"?p.amount_cents:-p.amount_cents),0);
       if(outstanding>0)return send(id,"Сначала зафиксируйте возврат: оплаченный заказ отменять нельзя.");
     }
-    const res=await run(db,"UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=?",status,order.id,order.status);
-    if(res.meta.changes!==1)return send(id,"Заказ уже изменён. Обновите данные.");
-    await run(db,"INSERT INTO status_history(order_id,old_status,new_status) VALUES(?,?,?)",order.id,order.status,status);
-    if(status==="canceled"&&order.kind==="catalog"){
-      const ii=await rows(db,"SELECT variant_id,quantity FROM order_items WHERE order_id=? AND variant_id IS NOT NULL",order.id);
-      for(const it of ii)await run(db,"UPDATE variants SET stock=stock+? WHERE id=?",it.quantity,it.variant_id);
-    }
+    // The D1 migration installs AFTER UPDATE triggers for both status history
+    // and exact-once inventory restoration. Keep every status transition
+    // a single atomic statement; never restock from JavaScript.
+    const res=await run(db,
+      "UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=? AND ("+
+      "?!='canceled' OR COALESCE((SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) FROM payments WHERE order_id=?),0)<=0)",
+      status,order.id,order.status,status,order.id);
+    if(res.meta.changes!==1)return send(id,"Статус или оплаты изменились. Обновите /order и повторите.");
     const c=await first(db,"SELECT telegram_id FROM customers WHERE id=?",order.customer_id);
     await send(id,"Заказ №"+order.id+": "+ru[status]);
     if(c&&c.telegram_id!==id)try{await send(c.telegram_id,"Статус заказа №"+order.id+": "+ru[status])}catch{}
@@ -236,7 +256,7 @@ export function makeHandler(env) {
     if(data==="cats")return catalogue(id);
     if(data==="cart")return cart(id,u);
     if(data==="mine")return allMine(id,u);
-    if(data==="custom"){await setSession(id,"custom","details");return send(id,"Опишите изделие, материал, фасон и цвет (от 10 символов). /cancel — отмена")}
+    if(data==="custom"){await setSession(id,"custom","details");return send(id,"Опишите изделие, материал, фасон и цвет (от 10 символов). Можно отправить до 4 фотографий на любом этапе. /cancel — отмена")}
     if(data==="checkout"){const c=await customer(u);const items=await rows(db,"SELECT variant_id FROM cart_items WHERE customer_id=?",c.id);if(!items.length)return send(id,"Корзина пуста.");await setSession(id,"checkout","name");return send(id,"Как к вам обращаться? /cancel — отмена")}
     const [action,value,...rest]=data.split(":");const n=safeInt(value);if(!n)return;
     if(action==="cat"){
@@ -269,24 +289,69 @@ export function makeHandler(env) {
       const st=action==="qa"?"confirmed":"canceled";
       const res=await run(db,"UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND quote_revision=? AND status='new'",st,n,revision);
       if(res.meta.changes!==1)return send(id,"Решение уже принято.");
-      await run(db,"INSERT INTO status_history(order_id,old_status,new_status) VALUES(?,'new',?)",n,st);
+      // The D1 trigger records this transition with the status update.
       await send(id,"Ваш ответ по заявке №"+n+": "+ru[st]);
       await notify("Ответ клиента по заявке №"+n+": "+ru[st]);
     }
   }
+  async function beginProductPhoto(id,productId){
+    if(!admins.has(id))return send(id,"Только администратор может загружать фотографии изделий.");
+    if(!productId)return send(id,"Пример: /photo 1");
+    const product=await first(db,"SELECT id,name FROM products WHERE id=?",productId);
+    if(!product)return send(id,"Изделие не найдено.");
+    await setSession(id,"product_photo","await_photo",{productId});
+    return send(id,"Отправьте фотографию изделия «"+product.name+"». Она будет показана в каталоге. /cancel — отмена.");
+  }
   async function message(m){
     const u=m.from,id=m.chat?.id,txt=textLimit(m.text,3500);
-    if(!u||!id||m.chat.type!=="private"||!txt)return;
+    if(!u||!id||m.chat.type!=="private")return;
+    if(Array.isArray(m.photo)&&m.photo.length){
+      const current=await session(id);
+      const fileId=String(m.photo.at(-1)?.file_id||"");
+      if(fileId.length<5||fileId.length>1024)return send(id,"Не получилось прочитать фотографию.");
+      if(current?.flow==="product_photo"&&admins.has(id)){
+        let values={};
+        try{values=JSON.parse(current.payload)}catch{}
+        const productId=safeInt(values.productId);
+        if(!productId)return send(id,"Неверный идентификатор изделия. /cancel");
+        const updated=await run(db,"UPDATE products SET photo_file_id=? WHERE id=?",fileId,productId);
+        await delSession(id);
+        return send(id,updated.meta.changes===1?"Фотография изделия №"+productId+" обновлена.":"Изделие не найдено.");
+      }
+      if(!current||current.flow!=="custom")
+        return send(id,"Для референсов начните оформление: /start → Индивидуальный пошив.");
+      let data={};
+      try{data=JSON.parse(current.payload)}catch{}
+      const photos=Array.isArray(data.photos)?data.photos:[];
+      if(photos.includes(fileId))return send(id,"Этот референс уже добавлен.");
+      if(photos.length>=4)return send(id,"Лимит: не больше четырёх референсов.");
+      photos.push(fileId);data.photos=photos;
+      await setSession(id,current.flow,current.step,data);
+      return send(id,"Референс сохранён ("+photos.length+"/4). Продолжайте заполнение заявки.");
+    }
+    if(!txt)return;
     const cmd=txt.split(/\s+/)[0].split("@")[0].toLowerCase();
-    if(cmd==="/start"){await delSession(id);await customer(u);return home(id)}
+    if(cmd==="/start"){
+      await delSession(id);await customer(u);
+      const photoMatch=txt.match(/^\/start\s+photo_([1-9][0-9]{0,10})$/);
+      if(photoMatch&&admins.has(id))return beginProductPhoto(id,safeInt(photoMatch[1]));
+      return home(id);
+    }
+    if(cmd==="/photo"){
+      if(!admins.has(id))return send(id,"Доступ запрещён.");
+      return beginProductPhoto(id,safeInt(txt.split(/\s+/)[1]));
+    }
     if(cmd==="/cancel"){await delSession(id);return send(id,"Ввод отменён. /start — главное меню.")}
     if(cmd==="/privacy")return send(id,"Храним данные Telegram, контакты, сведения о заказах и мерках в Cloudflare D1. Данные видны администратору. Оплаты учитываются только вручную. /forgetme — обезличить закрытые заказы.");
     if(cmd==="/forgetme"){
       const c=await customer(u);
       const open=await first(db,"SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status NOT IN ('completed','canceled')",c.id);
       if(open.n>0)return send(id,"У вас есть незавершённые заказы. Свяжитесь с менеджером для удаления.");
-      await run(db,"UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?",c.id);
-      await run(db,"UPDATE customers SET full_name='',username='' WHERE id=?",c.id);
+      await db.batch([
+        db.prepare("DELETE FROM custom_attachments WHERE order_id IN (SELECT id FROM orders WHERE customer_id=?)").bind(c.id),
+        db.prepare("UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?").bind(c.id),
+        db.prepare("UPDATE customers SET full_name='',username='' WHERE id=?").bind(c.id)
+      ]);
       return send(id,"Контакты и мерки в закрытых заказах обезличены.");
     }
     if(cmd.startsWith("/")&&["/admin","/orders","/order","/status","/quote","/payment","/report","/stats"].includes(cmd))
@@ -320,16 +385,79 @@ export function makeHandler(env) {
   };
 }
 
+async function productImage(id,env){
+  const db=env.DB;
+  if(!db||!env.BOT_TOKEN||!id)return new Response("Not Found",{status:404});
+  const product=await db.prepare("SELECT photo_file_id FROM products WHERE id=? AND active=1").bind(id).first();
+  if(!product?.photo_file_id)return new Response("Not Found",{status:404});
+  try{
+    const infoResponse=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/getFile",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({file_id:product.photo_file_id})
+    });
+    if(!infoResponse.ok)return new Response("Image unavailable",{status:502});
+    const meta=await infoResponse.json();
+    const file=meta?.result;
+    if(!meta.ok||!file||file.file_size>8_000_000||!/^photos\/[a-zA-Z0-9_.-]+\.(jpg|jpeg|png|webp)$/.test(file.file_path||""))
+      return new Response("Image unavailable",{status:404});
+    const payload=await fetch("https://api.telegram.org/file/bot"+env.BOT_TOKEN+"/"+file.file_path);
+    if(!payload.ok)return new Response("Image unavailable",{status:502});
+    const content=payload.headers.get("content-type")||"";
+    if(!/^image\/(jpeg|png|webp)(;|$)/i.test(content))return new Response("Invalid image",{status:502});
+    return new Response(payload.body,{status:200,headers:{
+      "Content-Type":content,"Cache-Control":"public, max-age=120",
+      "X-Content-Type-Options":"nosniff"
+    }});
+  }catch{return new Response("Image unavailable",{status:502})}
+}
 export default {
   async fetch(request, env, context) {
     const url=new URL(request.url);
     if(request.method==="GET"&&url.pathname==="/health")
-      return Response.json({ok:true,bot:"atelier",mode:env.DEMO_MODE==="0"?"production":"demo",database:!!env.DB});
-    if(url.pathname!=="/webhook"||request.method!=="POST")return new Response("Not Found",{status:404});
+      return Response.json({ok:true,bot:"atelier",mode:demo(env)?"demo":"production",database:!!env.DB});
+    if(request.method==="GET"&&url.pathname.startsWith("/media/product/")){
+      const id=safeInt(url.pathname.slice("/media/product/".length));
+      return productImage(id,env);
+    }
+    if(url.pathname.startsWith("/api/")){
+      try{return await handleApi(request,env,url)}
+      catch(e){
+        console.error("Mini App API request failed:",e?.name||"Unknown");
+        return Response.json({ok:false,error:e instanceof SyntaxError?"Invalid JSON":"Server error"},
+          {status:e instanceof SyntaxError?400:500,headers:{"Cache-Control":"no-store"}});
+      }
+    }
+    if(request.method==="GET"&&["/","/app","/admin"].includes(url.pathname)){
+      if(!env.ASSETS)return new Response("Mini App assets unavailable",{status:503});
+      const page=new URL("/",url);
+      const asset=await env.ASSETS.fetch(new Request(page,request));
+      const headers=new Headers(asset.headers);
+      headers.set("Content-Security-Policy",
+        "default-src 'self'; script-src 'self' https://telegram.org; "+
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "+
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+      headers.set("Referrer-Policy","no-referrer");
+      headers.set("X-Content-Type-Options","nosniff");
+      headers.set("Cache-Control","no-store");
+      return new Response(asset.body,{status:asset.status,headers});
+    }
+    if(url.pathname!=="/webhook"||request.method!=="POST")
+      return request.method==="GET"&&env.ASSETS
+        ? env.ASSETS.fetch(request)
+        : new Response("Not Found",{status:404});
     if(!env.WEBHOOK_SECRET||request.headers.get("X-Telegram-Bot-Api-Secret-Token")!==env.WEBHOOK_SECRET)
       return new Response("Forbidden",{status:403});
     let update;
     try{update=await request.json()}catch{return new Response("Bad Request",{status:400})}
     try{await makeHandler(env).handle(update);return new Response("OK")}catch(e){console.error("Webhook handler failed:",e?.message?.replace(env.BOT_TOKEN||"\u0000","[REDACTED]")||"unknown");return new Response("Error",{status:500})}
+  },
+  async scheduled(event,env,ctx){
+    if(!env.DB)return;
+    // Bounded retention for technical metadata; customer orders are preserved.
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM processed_updates WHERE processed_at < datetime('now','-14 days')"),
+      env.DB.prepare("DELETE FROM sessions WHERE updated_at < datetime('now','-30 days')"),
+      env.DB.prepare("DELETE FROM checkout_requests WHERE created_at < datetime('now','-90 days')")
+    ]);
   }
 };

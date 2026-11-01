@@ -3,7 +3,7 @@ import asyncio
 import os
 from pathlib import Path
 from aiogram import Bot
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from atelier.config import load_local_env
 
 async def main():
@@ -23,6 +23,12 @@ async def main():
             BotCommand(command="privacy",description="Обработка данных"),
             BotCommand(command="forgetme",description="Удалить личные данные"),
         ])
+        await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
+            text="Открыть ателье",web_app=WebAppInfo(
+                url="https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev/app"
+            )
+        ))
+        print("MINIAPP_MENU_BUTTON_CONFIGURED",True)
         print("PROFILE_CONFIGURED",True,"demo_mode",demo)
     finally:
         await bot.session.close()

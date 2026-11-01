@@ -8,6 +8,9 @@ function database(){
   const db=new DatabaseSync(':memory:');
   db.exec(readFileSync(new URL('../schema.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../seed.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0001_order_status_triggers.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0002_miniapp.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0003_store_readiness.sql',import.meta.url),'utf8'));
   return {
     raw: db,
     prepare(sql){
@@ -213,4 +216,132 @@ test('two simultaneous final checkout messages must create one order',async()=>{
     assert.equal(sql.prepare("SELECT stock FROM variants WHERE id=1").get().stock,4);
     assert.equal(sql.prepare("SELECT COUNT(*) n FROM order_items").get().n,1);
   }finally{globalThis.fetch=old;sql.close()}
+});
+
+test('cancellation trigger restores each SKU exactly once and records one transition',async()=>{
+  const storage=database(),sql=storage.raw;
+  sql.prepare("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test')").run();
+  sql.prepare("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'catalog','new')").run();
+  sql.prepare("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(1,1,'Bag','one size','beige',2,250000,100000),(1,2,'Tshirt','S','white',3,300000,140000)").run();
+  sql.prepare("UPDATE variants SET stock=stock-2 WHERE id=1").run();
+  sql.prepare("UPDATE variants SET stock=stock-3 WHERE id=2").run();
+  const original = [sql.prepare("SELECT stock FROM variants WHERE id=1").get().stock,sql.prepare("SELECT stock FROM variants WHERE id=2").get().stock];
+  assert.deepEqual(original,[3,5]);
+  sql.prepare("UPDATE orders SET status='canceled' WHERE id=1 AND status='new'").run();
+  assert.deepEqual([sql.prepare("SELECT stock FROM variants WHERE id=1").get().stock,sql.prepare("SELECT stock FROM variants WHERE id=2").get().stock],[5,8]);
+  sql.prepare("UPDATE orders SET status='canceled' WHERE id=1").run();
+  assert.deepEqual([sql.prepare("SELECT stock FROM variants WHERE id=1").get().stock,sql.prepare("SELECT stock FROM variants WHERE id=2").get().stock],[5,8]);
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM status_history WHERE order_id=1").get().n,1);
+  sql.prepare("INSERT INTO orders(id,customer_id,kind,status) VALUES(2,1,'custom','new')").run();
+  sql.prepare("UPDATE orders SET status='canceled' WHERE id=2").run();
+  assert.equal(sql.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5,"custom cancellation must not touch stock");
+  storage.raw.close();
+});
+
+test('cancellation remains atomic if stock update is prevented by database constraint',async()=>{
+  const storage=database(),sql=storage.raw;
+  sql.prepare("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test')").run();
+  sql.prepare("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'catalog','new')").run();
+  sql.prepare("INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(1,1,'Bag','one size','beige',2,250000,100000)").run();
+  sql.exec("CREATE TRIGGER force_restoration_failure BEFORE UPDATE OF stock ON variants WHEN NEW.stock > OLD.stock BEGIN SELECT RAISE(ABORT, 'fault injection'); END;");
+  assert.throws(()=>sql.prepare("UPDATE orders SET status='canceled' WHERE id=1").run(),/fault injection/);
+  assert.equal(sql.prepare("SELECT status FROM orders WHERE id=1").get().status,'new',
+    "status change must roll back with stock");
+  assert.equal(sql.prepare("SELECT COUNT(*) n FROM status_history WHERE order_id=1").get().n,0);
+  storage.raw.close();
+});
+
+test('Telegram photo reference is captured in tailoring application',async()=>{
+  const storage=database(),env={DB:storage,BOT_TOKEN:"123:demo_test_token_not_real",WEBHOOK_SECRET:"secret-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const old=globalThis.fetch;
+  const send=[];
+  globalThis.fetch=async(url,opts)=>{send.push({method:String(url).split("/").pop(),body:JSON.parse(opts.body)});return Response.json({ok:true,result:true})};
+  let n=300;
+  const call=async(update)=>{
+    const req=new Request("https://example.com/webhook",{method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},body:JSON.stringify(update)});
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    await call(makeCallback(n++,"custom"));
+    const photo=makeUpdate(n++,{text:""});
+    delete photo.message.text;
+    photo.message.photo=[{file_id:"TINY_REFERENCE",width:100,height:100},{file_id:"LARGE_REFERENCE",width:1000,height:800}];
+    assert.equal((await call(photo)).status,200);
+    for(const t of ["Хочу пальто из мягкой ткани","Рост 185, размер 50","Demo Person","@demo","Самовывоз"]){
+      assert.equal((await call(makeUpdate(n++,{text:t}))).status,200);
+    }
+    const order=storage.raw.prepare("SELECT id FROM orders WHERE kind='custom' ORDER BY id DESC LIMIT 1").get();
+    assert(order);
+    const attaches=storage.raw.prepare("SELECT telegram_file_id FROM custom_attachments WHERE order_id=?").all(order.id);
+    assert.deepEqual(attaches.map(a=>a.telegram_file_id),["LARGE_REFERENCE"]);
+    assert(send.some(s=>s.method==="sendMessage"&&s.body.text?.includes("Референс")));
+  }finally{globalThis.fetch=old;storage.raw.close()}
+});
+
+test('admin uploads a product photo via Telegram and media proxy protects bot token',async()=>{
+  const storage=database(),env={DB:storage,BOT_TOKEN:"123:demo_test_token_not_real",WEBHOOK_SECRET:"secret-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const old=globalThis.fetch;
+  const seen=[];
+  globalThis.fetch=async(url,opts)=>{
+    seen.push(String(url).split("/").pop());
+    if(String(url).endsWith("/getFile"))return Response.json({ok:true,result:{file_path:"photos/file_123.jpg",file_size:3}});
+    if(String(url).includes("/file/bot"))return new Response(new Uint8Array([255,216,255]),{headers:{"Content-Type":"image/jpeg"}});
+    return Response.json({ok:true,result:true});
+  };
+  let n=510;
+  const call=async(update)=>{
+    const req=new Request("https://example.com/webhook",{method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},body:JSON.stringify(update)});
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    const result=await call(makeUpdate(n++,{text:"/photo 1"}));
+    assert.equal(result.status,200);
+    const photo=makeUpdate(n++,{text:""});delete photo.message.text;
+    photo.message.photo=[{file_id:"TELEGRAM-PRODUCT-FILE-ID-12345",width:400,height:400}];
+    assert.equal((await call(photo)).status,200);
+    assert.equal(storage.raw.prepare("SELECT photo_file_id FROM products WHERE id=1").get().photo_file_id,"TELEGRAM-PRODUCT-FILE-ID-12345");
+    const image=await worker.fetch(new Request("https://example.com/media/product/1"),env,{});
+    assert.equal(image.status,200);
+    assert.equal(image.headers.get("Content-Type"),"image/jpeg");
+    assert(!Array.from(image.headers.values()).join(" ").includes(env.BOT_TOKEN));
+    assert.deepEqual(Array.from(new Uint8Array(await image.arrayBuffer())),[255,216,255]);
+  }finally{globalThis.fetch=old;storage.raw.close()}
+});
+
+test('scheduled cleanup removes old Telegram technical records but retains orders',async()=>{
+  const storage=database(),db=storage.raw;
+  db.exec("INSERT INTO processed_updates(update_id,processed_at) VALUES(1,datetime('now','-20 days')),(2,datetime('now'));");
+  db.exec("INSERT INTO sessions(telegram_id,flow,step,payload,updated_at) VALUES(111,'custom','name','{}',datetime('now','-45 days')),(222,'custom','name','{}',datetime('now'));");
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'test')");
+  db.exec("INSERT INTO orders(id,customer_id,kind,status) VALUES(1,1,'custom','new')");
+  db.exec("INSERT INTO checkout_requests(telegram_id,request_key,order_id,created_at) VALUES(777,'oldkey',1,datetime('now','-100 days')),(777,'newkey',1,datetime('now'));");
+  await worker.scheduled({scheduledTime:Date.now()},{DB:storage},{});
+  assert.deepEqual(db.prepare("SELECT update_id FROM processed_updates ORDER BY update_id").all().map(x=>x.update_id),[2]);
+  assert.deepEqual(db.prepare("SELECT telegram_id FROM sessions").all().map(x=>x.telegram_id),[222]);
+  assert.deepEqual(db.prepare("SELECT request_key FROM checkout_requests").all().map(x=>x.request_key),["newkey"]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,1);
+  storage.raw.close();
+});
+
+test('forgetme removes photos and tailoring measurements from completed records',async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"123:demo_test_token_not_real",WEBHOOK_SECRET:"secret-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const old=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({ok:true,result:true});
+  const call=async(up)=>{
+    const req=new Request("https://example.com/webhook",{method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},body:JSON.stringify(up)});
+    return worker.fetch(req,env,{waitUntil(){}});
+  };
+  try{
+    db.prepare("INSERT INTO customers(id,telegram_id,full_name,username) VALUES(1,777,'Demo','demo')").run();
+    db.prepare("INSERT INTO orders(id,customer_id,kind,status,contact_name,contact_phone,custom_details,custom_measurements) VALUES(1,1,'custom','completed','Demo','@demo','Wool jacket','Chest 100')").run();
+    db.prepare("INSERT INTO custom_attachments(order_id,telegram_file_id) VALUES(1,'TELEGRAM_IMAGE_FILE')").run();
+    assert.equal((await call(makeUpdate(811,{text:"/forgetme"}))).status,200);
+    const order=db.prepare("SELECT contact_name,contact_phone,custom_details,custom_measurements FROM orders WHERE id=1").get();
+    assert.equal(order.contact_name,"");
+    assert.equal(order.contact_phone,"");
+    assert.equal(order.custom_details,"");
+    assert.equal(order.custom_measurements,"");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM custom_attachments").get().n,0);
+  }finally{globalThis.fetch=old;db.close()}
 });

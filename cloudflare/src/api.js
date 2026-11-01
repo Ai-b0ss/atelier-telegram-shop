@@ -1,4 +1,6 @@
 import {verifyTelegramInitData,isAdmin,demoMode} from "./auth.js";
+import {managerUsername,managerUrl,orderDraft,customDraft} from "./manager.js";
+import {outboxStatements,deliverOutbox,outboxHealth} from "./outbox.js";
 
 const json=(data,status=200)=>Response.json(data,{status,headers:{"cache-control":"no-store","x-content-type-options":"nosniff"}});
 const err=(message,status=400)=>json({ok:false,error:message},status);
@@ -71,7 +73,7 @@ export async function handleApi(request,env,url){
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
     const products=await rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,CASE WHEN p.photo_file_id IS NOT NULL AND p.photo_file_id<>'' THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY p.id LIMIT 150");
     const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600");
-    return json({ok:true,demo:demoMode(env),categories,products,variants});
+    return json({ok:true,demo:demoMode(env),manager:managerUsername(env),categories,products,variants});
   }
   const auth=request.headers.get("Authorization")||"";
   if(!auth.startsWith("tma "))return err("Open via Telegram",401);
@@ -84,7 +86,7 @@ export async function handleApi(request,env,url){
 
   if(request.method==="GET"&&path==="/api/cart"){
     const c=await getCustomer(env.DB,u);
-    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.name,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
+    const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.id AS product_id,p.name,CASE WHEN p.photo_file_id IS NOT NULL AND p.photo_file_id<>'' THEN 1 ELSE 0 END AS photo_available,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id);
     return json({ok:true,items,total_cents:items.reduce((n,x)=>n+x.quantity*x.price_cents,0)});
   }
   if(request.method==="POST"&&path==="/api/cart"){
@@ -125,7 +127,7 @@ export async function handleApi(request,env,url){
     const previous=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
     if(previous){
       if(previous.kind!=="catalog")return err("Request key already used for tailoring",409);
-      return json({ok:true,orderId:previous.order_id,duplicate:true});
+      return json({ok:true,orderId:previous.order_id,duplicate:true,managerUrl:managerUrl(env,"Здравствуйте! Хочу оплатить заказ №"+previous.order_id+".")});
     }
     const c=await getCustomer(env.DB,u);
     const cartLines=await first(env.DB,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
@@ -163,7 +165,8 @@ export async function handleApi(request,env,url){
         dbStatement(env.DB,
           "INSERT INTO status_history(order_id,new_status) "+
           "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),'new')",
-          u.id,requestKey)
+          u.id,requestKey),
+        ...outboxStatements(env.DB,env,"catalog",u.id,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",[u.id,requestKey])
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);
       if(!orderId){
@@ -176,17 +179,13 @@ export async function handleApi(request,env,url){
       const found=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
       if(found){
         if(found.kind!=="catalog")return err("Request key already used for tailoring",409);
-        return json({ok:true,orderId:found.order_id,duplicate:true});
+        return json({ok:true,orderId:found.order_id,duplicate:true,managerUrl:managerUrl(env,"Здравствуйте! Хочу оплатить заказ №"+found.order_id+".")});
       }
       return err("Stock or cart changed during checkout. Your cart is preserved.",409);
     }
     if(!orderId)return err("Order committed but confirmation could not be retrieved; contact support.",503);
-    try{await telegramSend(env,u.id,"Демо-заказ №"+orderId+" оформлен. Оплата не проводилась.");}catch{}
-    for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
-      if(adminId===u.id)continue;
-      try{await telegramSend(env,adminId,"Новый тестовый заказ из Mini App №"+orderId+"; сумма "+(total/100).toFixed(2)+" ₽.");}catch{}
-    }
-    return json({ok:true,orderId});
+    try{await deliverOutbox(env,{orderId})}catch{}
+    return json({ok:true,orderId,managerUrl:managerUrl(env,orderDraft(orderId,items,total))});
   }
   if(request.method==="POST"&&path==="/api/custom"){
     const b=await safeBody(request),requestKey=text(b.requestKey,64);
@@ -210,7 +209,8 @@ export async function handleApi(request,env,url){
           c.id,name,phone,address,description,measurements),
         dbStatement(env.DB,
           "INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,last_insert_rowid())",
-          u.id,requestKey)
+          u.id,requestKey),
+        ...outboxStatements(env.DB,env,"custom",u.id,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",[u.id,requestKey])
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);
       if(!orderId){
@@ -227,10 +227,8 @@ export async function handleApi(request,env,url){
       return err("Request could not be saved; retry",409);
     }
     if(!orderId)return err("Request saved but confirmation unavailable; contact support.",503);
-    for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
-      try{await telegramSend(env,adminId,"Новая тестовая заявка на индивидуальный пошив №"+orderId+" из Mini App.");}catch{}
-    }
-    return json({ok:true,orderId});
+    try{await deliverOutbox(env,{orderId})}catch{}
+    return json({ok:true,orderId,managerUrl:managerUrl(env,customDraft(orderId))});
   }
   if(request.method==="GET"&&path==="/api/admin/dashboard"){
     const products=await rows(env.DB,"SELECT p.id,p.name,p.description,p.category_id,p.active,p.photo_file_id,c.name AS category_name FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id LIMIT 200");
@@ -258,6 +256,7 @@ export async function handleApi(request,env,url){
       bookedRevenueCents:Number(totals?.booked_revenue_cents||0),
       grossMarginCents:Number(totals?.gross_margin_cents||0),
       paidNetCents:Number(payments?.net_cents||0),
+      notifications:await outboxHealth(env.DB),
       lowStockCount:Number(lowStock?.n||0),
       ordersByStatus:Object.fromEntries(statuses.map(status=>
         [status,Number(counts.find(x=>x.status===status)?.n||0)]))

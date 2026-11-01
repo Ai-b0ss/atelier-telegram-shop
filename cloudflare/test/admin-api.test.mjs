@@ -380,3 +380,38 @@ test("checkout also rejects changed quantity or seller price before commit",asyn
     }finally{globalThis.fetch=originalFetch;db.close()}
   }
 });
+
+
+test("checkout is atomic even if D1 fails and no cleanup query is possible",async()=>{
+  const storage=localDB(), db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const prepare=storage.prepare.bind(storage);
+  const batch=storage.batch.bind(storage);
+  let failed=false;
+  storage.prepare=sql=>{
+    if(failed && /^(DELETE FROM orders|UPDATE orders SET contact_name)/.test(sql))
+      throw new Error("Synthetic D1 outage during attempted cleanup");
+    return prepare(sql);
+  };
+  storage.batch=async statements=>{
+    // Deliberately execute the first statement, then fail the same
+    // transaction. A safe checkout must not leave an order header behind.
+    try{
+      return await batch([statements[0],
+        prepare("INSERT INTO categories(id,name) VALUES(1,'duplicate-fixture-key')")]);
+    }finally{failed=true}
+  };
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    const response=await call(env,"/api/checkout","POST",{
+      requestKey:"atomic_d1_outage_1234567890",name:"Private Sample",
+      phone:"@contact",address:"Synthetic pickup"
+    });
+    assert.equal(response.status,409);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM orders").get().n,0,
+      "failed transaction must not leave order header or personal data");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM checkout_requests").get().n,0);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM cart_items").get().n,1);
+    assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
+  }finally{db.close()}
+});

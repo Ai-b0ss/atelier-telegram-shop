@@ -101,7 +101,7 @@ body.is-inner-view .section-heading{margin-top:12px}
 .hero.has-media .hero-bars{display:flex;position:absolute;top:12px;left:12px;right:12px;gap:5px;z-index:2;pointer-events:none}
 .hero-bars i{flex:1;height:2.5px;border-radius:2px;background:#fbfaf64d;overflow:hidden;position:relative}
 .hero-bars i:after{content:"";position:absolute;inset:0;background:var(--white);transform:scaleX(0);transform-origin:left}
-.hero-bars i.done:after{transform:none}
+.hero-bars i.seen:after{transform:none}
 .hero-bars i.on:after{animation:fillbar 5s linear both}
 @keyframes fillbar{to{transform:none}}
 #view-catalog{scroll-margin-top:68px}

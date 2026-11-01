@@ -73,7 +73,7 @@ const SLIDE_MS=5000;
 function showSlide(at){
   heroState.at=at;
   $("hero-media").querySelectorAll(".hero-slide").forEach((el,i)=>el.classList.toggle("on",i===at));
-  $("hero-bars").querySelectorAll("i").forEach((el,i)=>{el.classList.toggle("done",i<at);el.classList.toggle("on",i===at)});
+  $("hero-bars").querySelectorAll("i").forEach((el,i)=>{el.classList.toggle("seen",i<at);el.classList.toggle("on",i===at)});
   clearTimeout(heroState.timer);
   if(heroState.slides.length>1&&!matchMedia("(prefers-reduced-motion:reduce)").matches)
     heroState.timer=setTimeout(()=>showSlide((at+1)%heroState.slides.length),SLIDE_MS);

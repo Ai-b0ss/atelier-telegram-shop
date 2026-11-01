@@ -75,3 +75,31 @@ jobs:
           assert vars.get("STORE_READY") != "1", "Sales must not be enabled by a code merge"
           print("Versioned Worker configuration is demo-only")
           PY
+
+  incident:
+    name: Record scheduled reliability failure
+    needs: [state-machine, regression]
+    if: ${{ always() && github.event_name == 'schedule' && (needs.state-machine.result != 'success' || needs.regression.result != 'success') }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Open or update a single tracked GitHub issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATE_RESULT: ${{ needs.state-machine.result }}
+          REGRESSION_RESULT: ${{ needs.regression.result }}
+        run: |
+          set -euo pipefail
+          title="[Reliability] Scheduled check failed"
+          body="Automated offline reliability regression failed. Review ${RUN_URL}. State-machine: ${STATE_RESULT}; regression: ${REGRESSION_RESULT}. Do not deploy until fixed and all checks pass."
+          existing="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "[Reliability] Scheduled check failed") | .number' | head -n 1)"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body"
+          fi

@@ -249,6 +249,13 @@ async function init(){
       x.setAttribute("aria-pressed",String(x===target));
     });renderProducts();
   });
+  // Telegram can fail to fetch a file_id image; preserve a readable, non-broken card.
+  $("products").addEventListener("error",event=>{
+    const image=event.target;
+    if(image?.matches?.("img.product-image")){
+      image.parentElement?.replaceChildren(document.createTextNode("Фото временно недоступно"));
+    }
+  },true);
   $("products").addEventListener("click",e=>{
     if(e.target.closest("[data-retry-catalog]")){safeRun(loadCatalog);return}
     const select=e.target.closest("[data-choice]");

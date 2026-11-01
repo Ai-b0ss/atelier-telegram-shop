@@ -23,7 +23,11 @@ function go(view){
   if(view==="admin"&&!state.me?.admin){toast("Управление доступно только администратору",true);return}
   state.view=view;
   document.querySelectorAll(".view").forEach(e=>e.classList.toggle("active",e.id==="view-"+view));
-  document.querySelectorAll("[data-view]").forEach(e=>e.classList.toggle("selected",e.dataset.view===view));
+  document.querySelectorAll("[data-view]").forEach(e=>{
+    const active=e.dataset.view===view;
+    e.classList.toggle("selected",active);
+    e.setAttribute("aria-pressed",String(active));
+  });
   if(view==="cart")safeRun(loadCart);
   if(view==="admin"&&state.me?.admin)safeRun(loadAdmin);
   window.scrollTo({top:0,behavior:"smooth"});
@@ -33,21 +37,22 @@ async function loadCatalog(){
   state.catalog=await api("/api/catalog");
   $("product-count").textContent=(state.catalog.products.length||0)+" изделий";
   const categories=[{id:0,name:"Всё"},...state.catalog.categories];
-  $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
+  $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
   renderProducts();
 }
 function renderProducts(){
   const list=state.catalog.products.filter(p=>!state.category||p.category_id===state.category);
   $("products").innerHTML=list.length?list.map((p,idx)=>{
     const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
-    const choice=state.selected[p.id]||variants[0]?.id;
+    const remembered=state.selected[p.id];
+    const choice=variants.find(v=>v.id===remembered)?.id??variants[0]?.id;
     state.selected[p.id]=choice;
-    const minimum=Math.min(...variants.map(v=>v.price_cents));
+    const selectedPrice=variants.find(v=>v.id===choice)?.price_cents;
     return '<article class="product-card"><div class="product-photo p'+((idx%3)+1)+'">'+
-      '<span class="photo-tag">ДЕМО · '+esc(categoryName(p.category_id))+'</span><span class="symbol">'+(p.photo_available?'<img class="product-image" loading="lazy" alt="'+esc(p.name)+'" src="/media/product/'+p.id+'">':(["A.","✦","○"][idx%3]))+'</span></div>'+
+      '<span class="photo-tag">ДЕМО · '+esc(categoryName(p.category_id))+'</span><span class="symbol">'+(p.photo_available?'<img class="product-image" loading="lazy" alt="'+esc(p.name)+'" src="/media/product/'+p.id+'">':"Фото готовится")+'</span></div>'+
       '<div class="product-details"><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p>'+
-      '<div class="price">'+(variants.length?money(minimum):"Нет в наличии")+'</div>'+
-      '<div class="variants">'+variants.map(v=>'<button class="variant-pill '+(choice===v.id?"selected":"")+'" data-choice="'+v.id+'" data-product="'+p.id+'" type="button">'+esc(v.size)+' · '+esc(v.color)+'</button>').join("")+'</div>'+
+      '<div class="price">'+(variants.length?money(selectedPrice):"Нет в наличии")+'</div>'+
+      '<div class="variants">'+variants.map(v=>'<button class="variant-pill '+(choice===v.id?"selected":"")+'" aria-pressed="'+(choice===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'" type="button">'+esc(v.size)+' · '+esc(v.color)+'</button>').join("")+'</div>'+
       '<button class="add-button" data-add="'+p.id+'" '+(!variants.length?"disabled":"")+'>'+(canUse()?"В корзину +":"Посмотреть в Telegram ↗")+'</button></div></article>'
   }).join(""):'<div class="card padded empty">Изделия этой категории пока не добавлены.</div>';
 }
@@ -225,14 +230,22 @@ async function init(){
   $("filters").addEventListener("click",e=>{
     const target=e.target.closest("[data-cat]");if(!target)return;
     state.category=Number(target.dataset.cat);
-    document.querySelectorAll("[data-cat]").forEach(x=>x.classList.toggle("selected",x===target));renderProducts();
+    document.querySelectorAll("[data-cat]").forEach(x=>{
+      x.classList.toggle("selected",x===target);
+      x.setAttribute("aria-pressed",String(x===target));
+    });renderProducts();
   });
   $("products").addEventListener("click",e=>{
     const select=e.target.closest("[data-choice]");
     if(select){state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);renderProducts();return}
     const add=e.target.closest("[data-add]");
     if(add)safeRun(async()=>{
-      if(!canUse()){toast("Тестовые заказы доступны только администратору Telegram",true);return}
+      if(!canUse()){
+        const botUrl="https://t.me/atelier_customwear_2611_bot";
+        if(app?.openTelegramLink)app.openTelegramLink(botUrl);
+        else window.open(botUrl,"_blank","noopener,noreferrer");
+        return;
+      }
       const variantId=state.selected[Number(add.dataset.add)];
       if(!variantId)return;
       await api("/api/cart","POST",{variantId,delta:1});toast("Добавлено в корзину");await loadCart();

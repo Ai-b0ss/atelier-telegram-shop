@@ -254,6 +254,9 @@ python -m compileall -q atelier
 
 ## Документация
 
+- [Редизайн Editorial Atelier v2: реальная приёмка, Chrome-проверки, скриншоты и университетские требования](docs/redesign-qa-and-university-status.md) — **ветка feature/editorial-atelier-v2**, пока не опубликована.
+
+
 - [Бизнес-процессы и критерии эффективности](docs/business-process.md)
 - [BPMN 2.0: продажи из каталога](docs/catalog-sales.bpmn)
 - [BPMN 2.0: индивидуальный пошив](docs/custom-tailoring.bpmn)

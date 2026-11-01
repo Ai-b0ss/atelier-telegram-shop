@@ -124,10 +124,21 @@ export async function handleApi(request,env,url){
         dbStatement(env.DB,"INSERT INTO status_history(order_id,new_status) VALUES(?,'new')",orderId)
       ]);
     }catch{
-      await run(env.DB,"UPDATE orders SET status='canceled' WHERE id=? AND status='new'",orderId);
+      // The order header was inserted before the atomic batch. A failed
+      // inventory transaction must not retain a phantom order with PII.
+      // Never delete a successfully committed order (items/request key exist).
+      const removed=await run(env.DB,
+        "DELETE FROM orders WHERE id=? AND status='new' "+
+        "AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?) "+
+        "AND NOT EXISTS(SELECT 1 FROM checkout_requests WHERE order_id=?)",
+        orderId,orderId,orderId);
+      if(removed.meta.changes===0)await run(env.DB,
+        "UPDATE orders SET contact_name='',contact_phone='',delivery_address='' "+
+        "WHERE id=? AND status='new' AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?) "+
+        "AND NOT EXISTS(SELECT 1 FROM checkout_requests WHERE order_id=?)",orderId,orderId,orderId);
       const found=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
       if(found)return json({ok:true,orderId:found.order_id,duplicate:true});
-      return err("Stock changed during checkout. Your cart is preserved.",409);
+      return err("Stock or cart changed during checkout. Your cart is preserved.",409);
     }
     try{await telegramSend(env,u.id,"Демо-заказ №"+orderId+" оформлен. Оплата не проводилась.");}catch{}
     for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){

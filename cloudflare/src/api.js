@@ -139,15 +139,29 @@ export async function handleApi(request,env,url){
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
     const settings=await first(env.DB,"SELECT * FROM store_settings WHERE id=1");
     const orders=await rows(env.DB,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at,o.custom_details,o.custom_measurements,(SELECT COUNT(*) FROM custom_attachments a WHERE a.order_id=o.id) AS attachment_count,(SELECT COUNT(*) FROM inventory_return_receipts r WHERE r.order_id=o.id) AS return_receipt_count,(SELECT COUNT(*) FROM status_history h WHERE h.order_id=o.id AND h.new_status='shipped') AS shipping_event_count,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id ORDER BY o.id DESC LIMIT 100");
-    const payments=await rows(env.DB,"SELECT kind,amount_cents FROM payments ORDER BY id DESC LIMIT 1000");
-    const net=payments.reduce((v,p)=>v+(p.kind==="received"?p.amount_cents:-p.amount_cents),0);
-    const completed=orders.filter(o=>o.status==="completed");
+    // Lists are deliberately bounded for mobile performance. Metrics are NOT:
+    // calculating totals from the latest 100 orders/1000 payments understates
+    // lifetime figures as soon as the shop has more history.
+    const totals=await first(env.DB,
+      "SELECT COUNT(*) AS order_count, "+
+      "COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) AS completed_count, "+
+      "COALESCE(SUM(CASE WHEN status!='canceled' THEN total_cents ELSE 0 END),0) AS booked_revenue_cents, "+
+      "COALESCE(SUM(CASE WHEN status='completed' THEN total_cents-cost_cents ELSE 0 END),0) AS gross_margin_cents "+
+      "FROM orders");
+    const counts=await rows(env.DB,"SELECT status,COUNT(*) AS n FROM orders GROUP BY status");
+    const payments=await first(env.DB,
+      "SELECT COALESCE(SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END),0) AS net_cents FROM payments");
+    const lowStock=await first(env.DB,"SELECT COUNT(*) AS n FROM variants WHERE stock<=3 AND active=1");
+    const statuses=["new","confirmed","in_production","ready","shipped","completed","canceled"];
     const metrics={
-      orderCount:orders.length,completedCount:completed.length,
-      bookedRevenueCents:orders.filter(o=>o.status!=="canceled").reduce((v,o)=>v+o.total_cents,0),
-      grossMarginCents:completed.reduce((v,o)=>v+o.total_cents-o.cost_cents,0),
-      paidNetCents:net,lowStockCount:variants.filter(v=>v.stock<=3&&v.active).length,
-      ordersByStatus:Object.fromEntries(["new","confirmed","in_production","ready","shipped","completed","canceled"].map(status=>[status,orders.filter(o=>o.status===status).length]))
+      orderCount:Number(totals?.order_count||0),
+      completedCount:Number(totals?.completed_count||0),
+      bookedRevenueCents:Number(totals?.booked_revenue_cents||0),
+      grossMarginCents:Number(totals?.gross_margin_cents||0),
+      paidNetCents:Number(payments?.net_cents||0),
+      lowStockCount:Number(lowStock?.n||0),
+      ordersByStatus:Object.fromEntries(statuses.map(status=>
+        [status,Number(counts.find(x=>x.status===status)?.n||0)]))
     };
     return json({ok:true,metrics,orders,products,variants,categories,settings,demo:demoMode(env)});
   }

@@ -110,9 +110,15 @@ export function makeHandler(env) {
       await db.batch(statements);
     } catch (error) {
       // No partial inventory change can commit on a failed D1 batch.
-      // Keep the cart so the buyer can retry with updated availability.
-      await run(db,"UPDATE orders SET status='canceled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='new'",oid);
-      await send(id,"Склад изменился. Заказ отменён, позиции в корзине сохранены.");
+      // Remove the uncommitted order header; its contact data must not be
+      // retained for an order that never actually existed.
+      const cleanup=await run(db,
+        "DELETE FROM orders WHERE id=? AND status='new' "+
+        "AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?)",oid,oid);
+      if(cleanup.meta.changes===0)await run(db,
+        "UPDATE orders SET contact_name='',contact_phone='',delivery_address='' "+
+        "WHERE id=? AND status='new' AND NOT EXISTS(SELECT 1 FROM order_items WHERE order_id=?)",oid,oid);
+      await send(id,"Склад или корзина изменились. Заказ не оформлен, позиции в корзине сохранены.");
       return;
     }
     await send(id,"Тестовый заказ №"+oid+" создан. Оплата не проводилась.");

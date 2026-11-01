@@ -189,3 +189,36 @@ test("isolated simulated identities: administrator and two separate buyers",asyn
   assert.equal((await dashboard.json()).orders.length,2);
  }finally{globalThis.fetch=saved;db.close()}
 });
+
+
+test("dashboard aggregates include history beyond recent list limits",async()=>{
+  const storage=localDB(), db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    db.exec(`
+      INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Test admin');
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<120)
+      INSERT INTO orders(id,customer_id,kind,status,total_cents,cost_cents)
+      SELECT i,1,'custom',CASE WHEN i<=50 THEN 'completed' ELSE 'new' END,2000,800 FROM n;
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1005)
+      INSERT INTO payments(order_id,kind,amount_cents,reference)
+      SELECT 1,'received',10,'' FROM n;
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<605)
+      INSERT INTO variants(product_id,sku,size,color,price_cents,cost_cents,stock,active)
+      SELECT 1,'EXTRA-'||i,'one size','test',100,10,1,1 FROM n;
+    `);
+    const response=await call(env,"/api/admin/dashboard");
+    assert.equal(response.status,200);
+    const d=await response.json();
+    assert.equal(d.orders.length,100,"recent orders should still be bounded");
+    assert.equal(d.variants.length,600,"editing list should still be bounded");
+    assert.equal(d.metrics.orderCount,120,"total order count must include old orders");
+    assert.equal(d.metrics.completedCount,50,"completed count must include old orders");
+    assert.equal(d.metrics.ordersByStatus.new,70);
+    assert.equal(d.metrics.ordersByStatus.completed,50);
+    assert.equal(d.metrics.bookedRevenueCents,240000);
+    assert.equal(d.metrics.grossMarginCents,60000);
+    assert.equal(d.metrics.paidNetCents,10050,"more than 1000 payment rows must be summed");
+    assert.equal(d.metrics.lowStockCount,605,"low stock count must include undisplayed variants");
+  }finally{db.close()}
+});

@@ -188,14 +188,31 @@ export function makeHandler(env) {
     const orders=await rows(db,"SELECT o.id,o.kind,o.status,o.total_cents,o.cost_cents,o.contact_name,o.contact_phone,o.delivery_address,o.created_at FROM orders o ORDER BY o.id DESC LIMIT 1000");
     const stocks=await rows(db,"SELECT p.name,v.sku,v.size,v.color,v.price_cents,v.cost_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id ORDER BY p.name,v.sku");
     const payments=await rows(db,"SELECT id,order_id,kind,amount_cents,reference,created_at FROM payments ORDER BY id DESC LIMIT 1000");
-    const totals={orders:orders.length,net:payments.reduce((v,x)=>v+(x.kind==="received"?x.amount_cents:-x.amount_cents),0)};
+    // Detailed sheets show only the most recent 1000 rows. The summary
+    // MUST represent the entire ledger, not the limited export slices.
+    const orderStats=await first(db,"SELECT COUNT(*) AS n FROM orders");
+    const paymentStats=await first(db,
+      "SELECT COUNT(*) AS n,COALESCE(SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END),0) AS net FROM payments");
+    const totals={orders:Number(orderStats?.n||0),net:Number(paymentStats?.net||0),payments:Number(paymentStats?.n||0)};
+    const partial=totals.orders>orders.length||totals.payments>payments.length;
     const data=makeXlsx([
       ["Заказы",["ID","Вид","Статус","Цена коп.","Себестоимость коп.","Имя","Контакт","Доставка","Дата"],orders.map(x=>[x.id,x.kind,x.status,x.total_cents,x.cost_cents,x.contact_name,x.contact_phone,x.delivery_address,x.created_at])],
       ["Остатки",["Изделие","SKU","Размер","Цвет","Цена коп.","Себестоимость коп.","Остаток"],stocks.map(x=>[x.name,x.sku,x.size,x.color,x.price_cents,x.cost_cents,x.stock])],
       ["Оплаты",["ID","Заказ","Тип","Сумма коп.","Номер","Дата"],payments.map(x=>[x.id,x.order_id,x.kind,x.amount_cents,x.reference,x.created_at])],
-      ["Итоги",["Показатель","Значение"],[["Количество заказов",totals.orders],["Чистые поступления (коп.)",totals.net],["Режим",demo(env)?"Демо":"Боевой"]]]
+      ["Итоги",["Показатель","Значение"],[
+        ["Количество заказов",totals.orders],
+        ["Чистые поступления (коп.)",totals.net],
+        ["Выведено заказов в XLSX",orders.length],
+        ["Всего учётных операций",totals.payments],
+        ["Выведено учётных операций в XLSX",payments.length],
+        ["Списки деталей неполные",partial?"Да — показаны только последние 1000 записей":"Нет"],
+        ["Режим",demo(env)?"Демо":"Боевой"]
+      ]]
     ]);
-    const body=new FormData();body.append("chat_id",String(id));body.append("caption","Демо-отчёт. Платежи — ручной учёт, не операции банка.");
+    const body=new FormData();body.append("chat_id",String(id));
+    body.append("caption",partial?
+      "Демо-отчёт: сводные показатели за всё время, детализация только по последним 1000 строкам. Платежи — ручной учёт.":
+      "Демо-отчёт. Платежи — ручной учёт, не операции банка.");
     body.append("document",new Blob([data],{type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}),"atelier-cloud-report.xlsx");
     const response=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/sendDocument",{method:"POST",body});
     if(!response.ok)throw new Error("Excel delivery failed: "+response.status);

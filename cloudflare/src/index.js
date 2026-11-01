@@ -496,9 +496,12 @@ export default {
     if(url.pathname.startsWith("/api/")){
       try{return await handleApi(request,env,url)}
       catch(e){
-        console.error("Mini App API request failed:",e?.name||"Unknown");
-        return Response.json({ok:false,error:e instanceof SyntaxError?"Invalid JSON":"Server error"},
-          {status:e instanceof SyntaxError?400:500,headers:{"Cache-Control":"no-store"}});
+        const clientStatus=e?.name==="RequestBodyError"&&[400,413].includes(e.status)
+          ?e.status:e instanceof SyntaxError?400:0;
+        if(!clientStatus)console.error("Mini App API request failed:",e?.name||"Unknown");
+        return Response.json({ok:false,error:clientStatus===413?"Request body too large":
+          clientStatus===400?"Invalid JSON":"Server error"},
+          {status:clientStatus||500,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
       }
     }
     if(request.method==="GET"&&["/","/app","/admin"].includes(url.pathname)){

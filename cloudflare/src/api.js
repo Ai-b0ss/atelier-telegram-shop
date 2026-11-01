@@ -122,8 +122,11 @@ export async function handleApi(request,env,url){
     const name=text(b.name,120),phone=text(b.phone,120),address=text(b.address,300);
     if(!/^[a-zA-Z0-9_-]{16,64}$/.test(requestKey)||name.length<2||phone.length<3||address.length<3)
       return err("Fill in name, contact and delivery method");
-    const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-    if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
+    const previous=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+    if(previous){
+      if(previous.kind!=="catalog")return err("Request key already used for tailoring",409);
+      return json({ok:true,orderId:previous.order_id,duplicate:true});
+    }
     const c=await getCustomer(env.DB,u);
     const cartLines=await first(env.DB,"SELECT COUNT(*) AS n FROM cart_items WHERE customer_id=?",c.id);
     const items=await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.stock,v.price_cents,v.cost_cents,p.name,v.size,v.color FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? AND v.active=1 AND p.active=1",c.id);
@@ -154,24 +157,27 @@ export async function handleApi(request,env,url){
           x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
         ...items.map(x=>dbStatement(env.DB,
           "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) "+
-          "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),?,?,?,?,?,?,?)",
+          "VALUES((SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?),?,?,?,?,?,?,?)",
           u.id,requestKey,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
         dbStatement(env.DB,"DELETE FROM cart_items WHERE customer_id=?",c.id),
         dbStatement(env.DB,
           "INSERT INTO status_history(order_id,new_status) "+
-          "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),'new')",
+          "VALUES((SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?),'new')",
           u.id,requestKey)
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);
       if(!orderId){
-        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        const committed=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
         orderId=committed?.order_id;
       }
     }catch{
       // A failed D1 batch rolls everything back, including the order header
       // and personal information. No compensating DELETE is necessary.
-      const found=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-      if(found)return json({ok:true,orderId:found.order_id,duplicate:true});
+      const found=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+      if(found){
+        if(found.kind!=="catalog")return err("Request key already used for tailoring",409);
+        return json({ok:true,orderId:found.order_id,duplicate:true});
+      }
       return err("Stock or cart changed during checkout. Your cart is preserved.",409);
     }
     if(!orderId)return err("Order committed but confirmation could not be retrieved; contact support.",503);
@@ -189,8 +195,11 @@ export async function handleApi(request,env,url){
     if(!/^[a-zA-Z0-9_-]{16,64}$/.test(requestKey)||description.length<10||
        name.length<2||phone.length<3||measurements.length<3||address.length<3)
       return err("Complete the tailoring request");
-    const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-    if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
+    const previous=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+    if(previous){
+      if(previous.kind!=="custom")return err("Request key already used for catalog checkout",409);
+      return json({ok:true,orderId:previous.order_id,duplicate:true});
+    }
     const c=await getCustomer(env.DB,u);
     let orderId;
     try{
@@ -205,13 +214,16 @@ export async function handleApi(request,env,url){
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);
       if(!orderId){
-        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        const committed=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
         orderId=committed?.order_id;
       }
     }catch{
       // No orphan or personal data remains after a failed D1 transaction.
-      const existing=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
-      if(existing)return json({ok:true,orderId:existing.order_id,duplicate:true});
+      const existing=await first(env.DB,"SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?",u.id,requestKey);
+      if(existing){
+        if(existing.kind!=="custom")return err("Request key already used for catalog checkout",409);
+        return json({ok:true,orderId:existing.order_id,duplicate:true});
+      }
       return err("Request could not be saved; retry",409);
     }
     if(!orderId)return err("Request saved but confirmation unavailable; contact support.",503);

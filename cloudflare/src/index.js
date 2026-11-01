@@ -426,8 +426,23 @@ async function productImage(id,env){
 export default {
   async fetch(request, env, context) {
     const url=new URL(request.url);
-    if(request.method==="GET"&&url.pathname==="/health")
-      return Response.json({ok:true,bot:"atelier",mode:demo(env)?"demo":"production",database:!!env.DB});
+    if(request.method==="GET"&&url.pathname==="/health"){
+      // A bound D1 object does not prove D1 is available. Perform one small
+      // read so monitoring detects database failures instead of reporting 200.
+      let database=false;
+      if(env.DB){
+        try{
+          const result=await env.DB.prepare("SELECT 1 AS alive").first();
+          database=Number(result?.alive)===1;
+        }catch{
+          console.error("Database health check failed");
+        }
+      }
+      return Response.json(
+        {ok:database,bot:"atelier",mode:demo(env)?"demo":"production",database},
+        {status:database?200:503,headers:{"Cache-Control":"no-store"}}
+      );
+    }
     if(request.method==="GET"&&url.pathname.startsWith("/media/product/")){
       const id=safeInt(url.pathname.slice("/media/product/".length));
       return productImage(id,env);

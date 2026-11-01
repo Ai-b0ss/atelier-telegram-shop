@@ -453,3 +453,34 @@ test("two simultaneous manual refunds cannot exceed the received amount",async()
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM payments WHERE kind='refunded'").get().n,1);
   }finally{globalThis.fetch=originalFetch;db.close()}
 });
+
+
+test("Excel summary reports complete history when order and payment tabs are capped",async()=>{
+  const storage=database(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:"fixture-token-not-real",WEBHOOK_SECRET:"fixture-"+"x".repeat(35),ADMIN_IDS:"777",DEMO_MODE:"1"};
+  db.exec("INSERT INTO customers(id,telegram_id,full_name) VALUES(1,777,'Synthetic accountant')");
+  db.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1005) "+
+    "INSERT INTO orders(id,customer_id,kind,status,total_cents,cost_cents) SELECT i,1,'custom','new',100,50 FROM n");
+  db.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1005) "+
+    "INSERT INTO payments(order_id,kind,amount_cents,reference) SELECT 1,'received',10,'' FROM n");
+  let xlsx=null;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    if(String(url).endsWith("/sendDocument"))
+      xlsx=Buffer.from(await options.body.get("document").arrayBuffer());
+    return Response.json({ok:true,result:true});
+  };
+  try{
+    const req=new Request("https://example.test/webhook",{
+      method:"POST",headers:{"X-Telegram-Bot-Api-Secret-Token":env.WEBHOOK_SECRET},
+      body:JSON.stringify(makeUpdate(99001,{text:"/report"}))
+    });
+    assert.equal((await worker.fetch(req,env,{waitUntil(){}})).status,200);
+    assert(xlsx,"Expected a generated real XLSX file");
+    // This XLSX writer uses stored (uncompressed) ZIP entries, so the sheet
+    // XML appears in the buffer and can be inspected without extra packages.
+    const raw=xlsx.toString("utf8");
+    assert.match(raw,/Количество заказов<\/t><\/is><\/c><c r="B2" t="n"><v>1005<\/v>/);
+    assert.match(raw,/Чистые поступления \(коп\.\)<\/t><\/is><\/c><c r="B3" t="n"><v>10050<\/v>/);
+  }finally{globalThis.fetch=originalFetch;db.close()}
+});

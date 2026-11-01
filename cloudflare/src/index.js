@@ -253,11 +253,17 @@ export function makeHandler(env) {
       const o=await first(db,"SELECT * FROM orders WHERE id=?",oid);
       if(!o)return send(id,"Заказ не найден.");
       if(kind==="received"&&o.status==="canceled")return send(id,"Нельзя записать поступление за отменённый заказ.");
-      const existing=await rows(db,"SELECT kind,amount_cents FROM payments WHERE order_id=?",oid);
-      const net=existing.reduce((a,x)=>a+(x.kind==="received"?x.amount_cents:-x.amount_cents),0);
-      if(kind==="refunded"&&amount>net)return send(id,"Возврат превышает поступления.");
-      try{const ins=await run(db,"INSERT INTO payments(order_id,kind,amount_cents,reference) VALUES(?,?,?,?)",oid,kind,amount,ref);
-        return send(id,"Учётная операция №"+ins.meta.last_row_id+": "+rub(amount)+". Реальные деньги не переводились.")
+      // Pre-reading the ledger is unsafe: two simultaneous refunds can both
+      // pass and exceed the received amount. Check its net balance atomically
+      // inside the INSERT statement, and forbid late receipts on cancellations.
+      try{
+        const ins=await run(db,
+          "INSERT INTO payments(order_id,kind,amount_cents,reference) "+
+          "SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM orders WHERE id=? AND (status!='canceled' OR ?!='received')) "+
+          "AND (?!='refunded' OR ?<=COALESCE((SELECT SUM(CASE WHEN kind='received' THEN amount_cents ELSE -amount_cents END) FROM payments WHERE order_id=?),0))",
+          oid,kind,amount,ref,oid,kind,kind,amount,oid);
+        if(ins.meta.changes!==1)return send(id,"Операция не записана: возврат превышает поступления или статус заказа изменился.");
+        return send(id,"Учётная операция №"+ins.meta.last_row_id+": "+rub(amount)+". Реальные деньги не переводились.");
       }catch{return send(id,"Не удалось записать операцию: проверьте уникальность номера.")}
     }
     if(cmd==="/stats"){

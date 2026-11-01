@@ -78,21 +78,28 @@ function showSlide(at){
   if(heroState.slides.length>1&&!matchMedia("(prefers-reduced-motion:reduce)").matches)
     heroState.timer=setTimeout(()=>showSlide((at+1)%heroState.slides.length),SLIDE_MS);
 }
-async function renderHero(){
+const heroSlide=x=>'<button type="button" class="hero-slide" data-open="'+x.id+'" aria-label="'+esc(x.name)+'"><img alt="" src="'+esc(x.src)+'"></button>';
+function renderHero(){
+  if(heroState.slides.length)return; // Refreshing the catalogue must not restart the slideshow.
   const shots=(state.catalog?.products||[]).flatMap(p=>p.images?.length?[{id:p.id,name:p.name,src:p.images[0]}]:[]);
-  // Low-resolution shots would look soft at full width, so the hero only uses sharp ones.
-  const sharp=await Promise.all(shots.map(shot=>new Promise(done=>{
-    const probe=new Image();
-    probe.onload=()=>done(probe.naturalWidth>=600?shot:null);
-    probe.onerror=()=>done(null);
-    probe.src=shot.src;
-  })));
-  heroState.slides=sharp.filter(Boolean);
-  if(!heroState.slides.length)return;
+  if(!shots.length)return;
+  // The first photo appears at once so the page does not jump when it loads.
+  heroState.slides=[shots[0]];
   $("hero").classList.add("has-media");
-  $("hero-media").innerHTML=heroState.slides.map(x=>'<button type="button" class="hero-slide" data-open="'+x.id+'" aria-label="'+esc(x.name)+'"><img alt="" src="'+esc(x.src)+'"></button>').join("");
-  $("hero-bars").innerHTML=heroState.slides.length>1?heroState.slides.map(()=>'<i></i>').join(""):"";
+  $("hero-media").innerHTML=heroSlide(shots[0]);
   showSlide(0);
+  // Low-resolution shots would look soft at full width, so later slides must be sharp.
+  shots.slice(1).forEach(shot=>{
+    const probe=new Image();
+    probe.onload=()=>{
+      if(probe.naturalWidth<600)return;
+      heroState.slides.push(shot);
+      $("hero-media").insertAdjacentHTML("beforeend",heroSlide(shot));
+      $("hero-bars").innerHTML=heroState.slides.map(()=>'<i></i>').join("");
+      showSlide(heroState.at);
+    };
+    probe.src=shot.src;
+  });
 }
 const stars=n=>"★".repeat(n)+"☆".repeat(5-n);
 const reviewDate=value=>{const d=new Date(String(value).replace(" ","T")+"Z");return isNaN(d)?"":d.toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"})};

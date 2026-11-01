@@ -35,8 +35,8 @@ jobs:
       - name: Run reproducible state-machine stress and checker self-test
         shell: bash
         env:
-          RELIABILITY_CASES: ${{ github.event_name == 'schedule' && '120' || '32' }}
-          RELIABILITY_STEPS: ${{ github.event_name == 'schedule' && '150' || '100' }}
+          RELIABILITY_CASES: '120'
+          RELIABILITY_STEPS: '150'
           # A new deterministic seed per scheduled run, printed for exact replay.
           RELIABILITY_SEED: ${{ github.event_name == 'schedule' && github.run_number || 26011001 }}
         run: |

@@ -101,8 +101,15 @@ export async function handleApi(request,env,url){
       await env.DB.batch([
         dbStatement(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,orderId),
         ...items.map(x=>dbStatement(env.DB,
-          "UPDATE variants SET stock=CASE WHEN active=1 AND EXISTS(SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1) THEN stock-? ELSE -1 END WHERE id=?",
-          x.quantity,x.variant_id)),
+          // Force a CHECK failure (and rollback this entire D1 batch) when
+          // another request changes any cart line, or the seller changes
+          // the price, cost or availability after we read the snapshot.
+          "UPDATE variants SET stock=CASE WHEN active=1 AND price_cents=? AND cost_cents=? "+
+          "AND EXISTS(SELECT 1 FROM products p WHERE p.id=variants.product_id AND p.active=1) "+
+          "AND EXISTS(SELECT 1 FROM cart_items ci WHERE ci.customer_id=? AND ci.variant_id=variants.id AND ci.quantity=?) "+
+          "AND (SELECT COUNT(*) FROM cart_items WHERE customer_id=?)=? "+
+          "THEN stock-? ELSE -1 END WHERE id=?",
+          x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
         ...items.map(x=>dbStatement(env.DB,"INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) VALUES(?,?,?,?,?,?,?,?)",
           orderId,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
         dbStatement(env.DB,"DELETE FROM cart_items WHERE customer_id=?",c.id),

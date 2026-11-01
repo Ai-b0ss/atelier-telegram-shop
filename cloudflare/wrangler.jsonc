@@ -3,7 +3,7 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-15",
   "workers_dev": true,
-  "triggers": {"crons": ["15 2 * * *"]},
+  "triggers": {"crons": ["*/5 * * * *"]},
   "assets": {"directory":"./public","binding":"ASSETS","run_worker_first":true},
   "observability": {
     "enabled": false
@@ -17,6 +17,7 @@
   ],
   "vars": {
     "DEMO_MODE": "1",
-    "STORE_READY": "0"
+    "STORE_READY": "0",
+    "MANAGER_USERNAME": "onlyrazor"
   }
 }

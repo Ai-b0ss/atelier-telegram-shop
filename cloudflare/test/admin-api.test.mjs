@@ -466,7 +466,8 @@ test("atomic multi-item checkout links both lines and idempotency to one order",
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,0);
     const retry=await call(env,"/api/checkout","POST",payload);
     assert.equal(retry.status,200);
-    assert.deepEqual(await retry.json(),{ok:true,orderId,duplicate:true});
+    assert.deepEqual(await retry.json(),{ok:true,orderId,duplicate:true,managerUrl:null});
+    assert.ok(db.prepare("SELECT COUNT(*) n FROM notification_outbox WHERE order_id=? AND event_type='catalog_customer'").get(orderId).n===1,"notification is committed with the order, once");
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM orders").get().n,1);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,2);
   }finally{globalThis.fetch=originalFetch;db.close()}

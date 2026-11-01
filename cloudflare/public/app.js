@@ -2,13 +2,13 @@ import {productCountLabel, syncTelegramBackButton, configureTelegramBackNavigati
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
 const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
-if(app){try{app.ready();app.expand();app.setHeaderColor("#f7f5f1");app.setBackgroundColor("#f7f5f1")}catch{}}
+if(app){try{app.ready();app.expand();app.setHeaderColor("#f3f0e9");app.setBackgroundColor("#f3f0e9")}catch{}}
 const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=amount=>new Intl.NumberFormat("ru-RU",{style:"currency",currency:"RUB",minimumFractionDigits:0,maximumFractionDigits:2}).format((Number(amount)||0)/100);
 const labels={new:"Новый",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов",shipped:"Отправлен",completed:"Завершён",canceled:"Отменён"};
 const next={new:["confirmed","canceled"],confirmed:["in_production","ready","canceled"],in_production:["ready","canceled"],ready:["shipped","completed","canceled"],shipped:["completed","canceled"]};
-const toast=(text,error=false)=>{const t=$("toast");t.textContent=text;t.classList.add("show");t.style.background=error?"#813d30":"#242420";clearTimeout(window.toastTimeout);window.toastTimeout=setTimeout(()=>t.classList.remove("show"),4000);};
+const toast=(text,error=false)=>{const t=$("toast");t.textContent=text;t.classList.add("show");t.style.background=error?"#9f3013":"#141412";clearTimeout(window.toastTimeout);window.toastTimeout=setTimeout(()=>t.classList.remove("show"),4000);};
 async function api(path,method="GET",body){
   const response=await fetch(path,{method,headers:{
     ...(initData?{"Authorization":"tma "+initData}:{}),
@@ -19,6 +19,28 @@ async function api(path,method="GET",body){
   return result;
 }
 const safeRun=async(fn)=>{try{return await fn()}catch(error){toast(error.message||"Не удалось выполнить запрос",true);return null}};
+const haptic=kind=>{try{kind==="success"?app?.HapticFeedback?.notificationOccurred("success"):app?.HapticFeedback?.impactOccurred(kind||"light")}catch{}};
+function openLink(url){
+  if(app?.openTelegramLink)app.openTelegramLink(url);
+  else window.open(url,"_blank","noopener,noreferrer");
+}
+const isDemo=()=>state.catalog?.demo!==false;
+function applyMode(){
+  const demo=isDemo();
+  $("environment").hidden=!demo;
+  $("demo-notice").hidden=!demo;
+  $("checkout-submit").textContent=demo?"Создать тестовый заказ":"Оформить заказ";
+}
+const photoHtml=(p,alt=true)=>p.photo_available?
+  '<img class="product-image" '+(alt?'alt="'+esc(p.name)+'"':'alt=""')+' decoding="async" loading="lazy" src="/media/product/'+Number(p.product_id??p.id)+'" data-photo>':
+  '<span class="photo-empty"><b>'+esc(String(p.name||"A").slice(0,1))+'</b><small>Фото скоро</small></span>';
+function setCartCount(n){
+  const badge=$("cart-count");
+  const changed=badge.textContent!==String(n);
+  badge.textContent=n;
+  badge.classList.toggle("is-empty",!n);
+  if(changed&&n){badge.classList.remove("bump");void badge.offsetWidth;badge.classList.add("bump")}
+}
 const canUse=()=>Boolean(state.me?.admin||(!state.me?.demo&&state.me?.user));
 function go(view){
   if(view==="admin"&&!state.me?.admin){toast("Управление доступно только администратору",true);return}
@@ -38,6 +60,7 @@ function go(view){
 const categoryName=id=>state.catalog?.categories?.find(c=>c.id===id)?.name||"Коллекция";
 async function loadCatalog(){
   state.catalog=await api("/api/catalog");
+  applyMode();
   $("product-count").textContent=productCountLabel(state.catalog.products.length);
   const categories=[{id:0,name:"Всё"},...state.catalog.categories];
   $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
@@ -49,20 +72,57 @@ function renderProducts(){
     return;
   }
   const list=state.catalog.products.filter(p=>!state.category||p.category_id===state.category);
+  $("products").removeAttribute("aria-busy");
   $("products").innerHTML=list.length?list.map((p,idx)=>{
     const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
-    const remembered=state.selected[p.id];
-    const choice=variants.find(v=>v.id===remembered)?.id??variants[0]?.id;
-    state.selected[p.id]=choice;
-    const selectedPrice=variants.find(v=>v.id===choice)?.price_cents;
-    return '<article class="product-card"><div class="product-photo p'+((idx%3)+1)+'">'+
-      '<span class="photo-tag">ДЕМО · '+esc(categoryName(p.category_id))+'</span><span class="symbol">'+(p.photo_available?'<img class="product-image" loading="lazy" alt="'+esc(p.name)+'" src="/media/product/'+p.id+'">':"Фото готовится")+'</span></div>'+
-      '<div class="product-details"><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p>'+
-      '<div class="price">'+(variants.length?money(selectedPrice):"Нет в наличии")+'</div>'+
-      '<div class="variants">'+variants.map(v=>'<button class="variant-pill '+(choice===v.id?"selected":"")+'" aria-pressed="'+(choice===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'" type="button">'+esc(v.size)+' · '+esc(v.color)+'</button>').join("")+'</div>'+
-      '<button class="add-button" data-add="'+p.id+'" '+(!variants.length?"disabled":"")+'>'+(canUse()?"В корзину +":"Посмотреть в Telegram ↗")+'</button></div></article>'
-  }).join(""):'<div class="card padded empty">Изделия этой категории пока не добавлены.</div>';
+    const prices=variants.map(v=>v.price_cents);
+    const low=prices.length?Math.min(...prices):0;
+    const label=!variants.length?"Нет в наличии":(Math.max(...prices)>low?"от ":"")+money(low);
+    return '<button type="button" class="product-card'+(variants.length?"":" is-sold")+'" style="--i:'+idx+'" data-open="'+p.id+'">'+
+      '<span class="product-photo">'+photoHtml(p)+'</span>'+
+      '<span class="product-meta"><b>'+esc(p.name)+'</b><span>'+esc(label)+'</span></span></button>';
+  }).join(""):'<div class="card padded empty">В этой категории пока ничего нет.</div>';
 }
+function openSheet(productId){
+  const p=state.catalog?.products.find(x=>x.id===productId);if(!p)return;
+  const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
+  const remembered=state.selected[p.id];
+  const choice=variants.find(v=>v.id===remembered)||variants[0];
+  if(choice)state.selected[p.id]=choice.id;
+  const action=!variants.length?"Нет в наличии":canUse()?"Добавить в корзину":"Открыть в Telegram";
+  $("sheet-content").innerHTML='<button type="button" class="sheet-close" data-sheet-close aria-label="Закрыть">×</button>'+
+    '<div class="sheet-photo">'+photoHtml(p)+'</div><div class="sheet-body"><h3 id="sheet-title">'+esc(p.name)+'</h3>'+
+    '<div class="sheet-price">'+(choice?money(choice.price_cents):"Нет в наличии")+'</div>'+
+    (p.description?'<p>'+esc(p.description)+'</p>':'')+
+    (variants.length?'<span class="sheet-label">Размер и цвет</span><div class="variants">'+variants.map(v=>'<button type="button" class="variant-pill '+(choice.id===v.id?"selected":"")+'" aria-pressed="'+(choice.id===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'">'+esc(v.size)+'<small>'+esc(v.color)+'</small></button>').join("")+'</div>':'')+
+    '<div class="stock-hint">'+(choice&&choice.stock<=3?(choice.stock===1?"Последняя вещь":"Осталось: "+choice.stock):"")+'</div>'+
+    '<button type="button" class="primary" data-add="'+p.id+'" '+(variants.length?"":"disabled")+'>'+action+'</button></div>';
+  const sheet=$("product-sheet");
+  sheet.classList.remove("closing");
+  if(!sheet.open)sheet.showModal();
+}
+function closeSheet(){
+  const sheet=$("product-sheet");
+  if(!sheet.open||sheet.classList.contains("closing"))return;
+  if(matchMedia("(prefers-reduced-motion:reduce)").matches){sheet.close();return}
+  sheet.classList.add("closing");
+  setTimeout(()=>{sheet.close();sheet.classList.remove("closing")},210);
+}
+function showDone({title,text,url}){
+  $("done-body").innerHTML='<svg class="done-mark" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="30"/><path d="M24 37l8 8 16-18"/></svg>'+
+    '<h2>'+esc(title)+'</h2><p>'+esc(text)+'</p>'+
+    (url?'<a class="primary" href="'+esc(url)+'" data-manager-link>Написать менеджеру</a>':'')+
+    '<button type="button" class="quiet" data-view-link="catalog">Вернуться в каталог</button>';
+  haptic("success");
+  go("done");
+}
+const doneCopy=(result,kind)=>{
+  const custom=kind==="custom";
+  if(isDemo())return {title:(custom?"Тестовая заявка №":"Тестовый заказ №")+result.orderId,text:"Это демо: настоящий заказ не создан, деньги никуда не отправляются.",url:null};
+  return {title:(custom?"Заявка №":"Заказ №")+result.orderId+(custom?" получена":" принят"),
+    text:result.managerUrl?(custom?"Остался один шаг: напишите менеджеру, чтобы обсудить детали и цену. Текст сообщения уже готов.":"Остался один шаг: напишите менеджеру, чтобы договориться об оплате и получении. Текст сообщения уже готов."):"Менеджер свяжется с вами по указанному контакту.",
+    url:result.managerUrl};
+};
 async function loadMe(){
   if(!initData){
     state.me={user:null,admin:false,demo:true};
@@ -82,18 +142,18 @@ async function loadMe(){
 }
 async function loadCart(){
   if(!canUse()){
-    $("cart-body").innerHTML='<div class="empty">Для тестовой корзины откройте Mini App через Telegram из аккаунта администратора. Настоящие покупки пока недоступны.</div>';
+    $("cart-body").innerHTML='<div class="empty">'+(isDemo()?"Магазин пока работает в тестовом режиме, заказы скоро откроются.":"Откройте магазин через Telegram, чтобы оформить заказ.")+'</div>';
     $("checkout-form").hidden=true;return;
   }
   state.cart=await api("/api/cart");
-  $("cart-count").textContent=state.cart.items.reduce((n,x)=>n+x.quantity,0);
+  setCartCount(state.cart.items.reduce((n,x)=>n+x.quantity,0));
   if(!state.cart.items.length){
     $("cart-body").innerHTML='<div class="empty">Пока пусто. Выберите изделие в каталоге.</div>';
     $("checkout-form").hidden=true;return;
   }
   const hasUnavailable=state.cart.items.some(x=>Number(x.available)===0);
   $("cart-body").innerHTML=(hasUnavailable?'<div class="notice" role="alert">Некоторые изделия недоступны или их осталось меньше, чем в корзине. Уменьшите количество или удалите эти позиции перед оформлением.</div>':"")+
-    state.cart.items.map(x=>'<div class="cart-row"><div><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small>'+
+    state.cart.items.map(x=>'<div class="cart-row"><span class="cart-thumb">'+photoHtml(x,false)+'</span><div class="cart-info"><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small>'+
     (Number(x.available)===0?'<small class="error">Временно недоступно — уменьшите количество или удалите</small>':"")+
     '</div><div class="qty-buttons">'+
     '<button data-qty="'+x.variant_id+'" data-delta="-1" aria-label="Уменьшить">−</button><span>'+x.quantity+'</span>'+
@@ -118,7 +178,7 @@ function renderPanel(){
   document.querySelectorAll(".panel-view").forEach(e=>e.classList.toggle("active",e.id==="panel-"+state.panel));
   document.querySelectorAll("[data-panel]").forEach(e=>e.classList.toggle("selected",e.dataset.panel===state.panel));
   const d=state.dashboard;if(!d)return;
-  if(state.panel==="orders")$("panel-orders").innerHTML='<div class="table-top"><h3>Последние заказы</h3><span class="muted">Тестовые операции</span></div>'+
+  if(state.panel==="orders")$("panel-orders").innerHTML='<div class="table-top"><h3>Последние заказы</h3><span class="muted">'+(isDemo()?"Тестовые операции":"")+'</span></div>'+
     '<div class="table-card"><table><thead><tr><th>Заказ</th><th>Вид</th><th>Статус</th><th>Сумма</th><th></th></tr></thead><tbody>'+d.orders.map(orderRow).join("")+'</tbody></table></div>';
   if(state.panel==="catalog")$("panel-catalog").innerHTML='<div class="table-top"><h3>Ассортимент</h3><button class="quiet" data-create-product="1">+ Добавить изделие</button></div>'+
     '<div class="table-card"><table><thead><tr><th>Название</th><th>Категория</th><th>Статус</th><th>Варианты</th><th></th></tr></thead><tbody>'+
@@ -139,7 +199,7 @@ function renderPanel(){
       '<label>HTTPS-ссылка на полную политику ПД<input name="privacyUrl" type="url" maxlength="500" value="'+esc(p.privacy_policy_url||"")+'"></label>'+
       '<button type="submit" class="primary">Сохранить настройки ↗</button>'+
       '</form><div class="analytics-card"><h3>Контроль запуска</h3>'+
-      '<p class="muted">Демо-режим принудительно включён. Ниже — подготовительные задачи, а не переключатели реальных платежей.</p>'+
+      '<p class="muted">'+(d.metrics.notifications?'Уведомления: в очереди '+d.metrics.notifications.pending+', не доставлено '+d.metrics.notifications.failed+'. ':'')+'Демо-режим принудительно включён. Ниже — подготовительные задачи, а не переключатели реальных платежей.</p>'+
       '<div class="cart-row"><span>Витрина и заказы</span><strong class="success">Демо</strong></div>'+
       '<div class="cart-row"><span>Банковский эквайринг</span><strong class="error">Не подключён</strong></div>'+
       '<div class="cart-row"><span>Реальные данные продавца</span><strong class="'+(p.legal_name&&p.tax_id?"success":"error")+'">'+(p.legal_name&&p.tax_id?"Заполнены":"Не заполнены")+'</strong></div>'+
@@ -223,7 +283,7 @@ async function saveEditor(e){
     }else if(get("status")){
       path="/api/admin/order/status";body={id,status:get("status")};
     }else {dialog.close();return}
-    if(!confirm("Подтвердить изменение тестового заказа №"+id+"?"))return;
+    if(!confirm("Подтвердить изменение заказа №"+id+"?"))return;
   }else return;
   $("editor-save").disabled=true;
   try{
@@ -259,31 +319,35 @@ async function init(){
     });renderProducts();
   });
   // Telegram can fail to fetch a file_id image; preserve a readable, non-broken card.
-  $("products").addEventListener("error",event=>{
+  document.addEventListener("error",event=>{
     const image=event.target;
-    if(image?.matches?.("img.product-image")){
-      image.parentElement?.replaceChildren(document.createTextNode("Фото временно недоступно"));
-    }
+    if(image?.matches?.("img[data-photo]"))image.replaceWith(Object.assign(document.createElement("span"),{className:"photo-empty",innerHTML:"<b></b><small>Фото недоступно</small>"}));
+  },true);
+  document.addEventListener("load",event=>{
+    if(event.target?.matches?.("img[data-photo]"))event.target.classList.add("loaded");
   },true);
   $("products").addEventListener("click",e=>{
     if(e.target.closest("[data-retry-catalog]")){safeRun(loadCatalog);return}
+    const card=e.target.closest("[data-open]");
+    if(card){haptic();openSheet(Number(card.dataset.open))}
+  });
+  const sheet=$("product-sheet");
+  sheet.addEventListener("cancel",e=>{e.preventDefault();closeSheet()});
+  sheet.addEventListener("click",e=>{
+    if(e.target===sheet||e.target.closest("[data-sheet-close]")){closeSheet();return}
     const select=e.target.closest("[data-choice]");
-    if(select){state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);renderProducts();return}
+    if(select){haptic();state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);openSheet(Number(select.dataset.product));return}
     const add=e.target.closest("[data-add]");
     if(add)safeRun(async()=>{
-      if(!canUse()){
-        const botUrl="https://t.me/atelier_customwear_2611_bot";
-        if(app?.openTelegramLink)app.openTelegramLink(botUrl);
-        else window.open(botUrl,"_blank","noopener,noreferrer");
-        return;
-      }
+      if(!canUse()){openLink("https://t.me/atelier_customwear_2611_bot");return}
       const variantId=state.selected[Number(add.dataset.add)];
-      if(!variantId)return;
-      if(state.pendingCart)return;
+      if(!variantId||state.pendingCart)return;
       state.pendingCart=true;
       add.disabled=true;
       try{
         await api("/api/cart","POST",{variantId,delta:1});
+        haptic("medium");
+        closeSheet();
         toast("Добавлено в корзину");
         await loadCart();
       }finally{
@@ -291,6 +355,11 @@ async function init(){
         add.disabled=false;
       }
     });
+  });
+  $("done-body").addEventListener("click",e=>{
+    const link=e.target.closest("[data-manager-link]");
+    if(link){e.preventDefault();openLink(link.href);return}
+    if(e.target.closest("[data-view-link]"))go("catalog");
   });
   $("cart-body").addEventListener("click",e=>{
     const b=e.target.closest("[data-qty]");
@@ -306,7 +375,7 @@ async function init(){
       const fd=new FormData(form);
       state.requestKey ||= crypto.randomUUID().replace(/-/g,"");
       const result=await api("/api/checkout","POST",{requestKey:state.requestKey,name:fd.get("name"),phone:fd.get("phone"),address:fd.get("address")});
-      toast("Тестовый заказ №"+result.orderId+" создан");state.requestKey=null;form.reset();await loadCart();go("catalog");
+      state.requestKey=null;form.reset();await loadCart();showDone(doneCopy(result,"catalog"));
     }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("tailor-form").addEventListener("submit",e=>{
@@ -315,12 +384,12 @@ async function init(){
     if(submit?.disabled)return;
     if(submit)submit.disabled=true;
     safeRun(async()=>{
-      if(!canUse())throw Error("Заявка доступна только в Telegram-демо");
+      if(!canUse())throw Error(isDemo()?"Заявки скоро откроются":"Откройте магазин через Telegram");
       const fd=new FormData(form);
       state.tailorRequestKey ||= crypto.randomUUID().replace(/-/g,"");
       const result=await api("/api/custom","POST",{...Object.fromEntries(fd),requestKey:state.tailorRequestKey});
       state.tailorRequestKey=null;
-      toast("Заявка №"+result.orderId+" зарегистрирована");form.reset();
+      form.reset();showDone(doneCopy(result,"custom"));
     }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("panel-tabs").addEventListener("click",e=>{const b=e.target.closest("[data-panel]");if(b){state.panel=b.dataset.panel;renderPanel()}});

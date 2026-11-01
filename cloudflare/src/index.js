@@ -1,6 +1,7 @@
 import { makeXlsx } from "./xlsx.js";
 import { handleApi } from "./api.js";
 import { demoMode } from "./auth.js";
+import { outboxStatements, deliverOutbox } from "./outbox.js";
 
 const statuses = ["new","confirmed","in_production","ready","shipped","completed","canceled"];
 const nextStatuses = {
@@ -108,7 +109,8 @@ export function makeHandler(env) {
       db.prepare("DELETE FROM cart_items WHERE customer_id=?").bind(c.id),
       db.prepare("INSERT INTO status_history(order_id,new_status) "+
         "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),'new')")
-        .bind(u.id,botKey)
+        .bind(u.id,botKey),
+      ...outboxStatements(db,env,"catalog",u.id,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",[u.id,botKey])
     ];
     let oid;
     try {
@@ -124,21 +126,23 @@ export function makeHandler(env) {
       return;
     }
     if(!oid)throw new Error("Committed order ID unavailable");
-    await send(id,"Тестовый заказ №"+oid+" создан. Оплата не проводилась.");
-    await notify("Новый демо-заказ №"+oid+" (каталог), сумма "+rub(total)+"\n/admin — управление");
+    try{await deliverOutbox(env,{orderId:oid})}catch{console.warn("Notification delivery deferred")}
   }
   async function createCustom(id,u,data,addr) {
     const c=await customer(u);
-    const ins=await run(db,"INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)",
-      c.id,data.name,data.phone,addr,data.details,data.measures);
+    // MAX(id) resolves inside this transaction, so it is this customer's new order.
+    const [ins]=await db.batch([
+      db.prepare("INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)")
+        .bind(c.id,data.name,data.phone,addr,data.details,data.measures),
+      ...outboxStatements(db,env,"custom",u.id,"SELECT MAX(id) FROM orders WHERE customer_id=?",[c.id])
+    ]);
     const orderId=ins.meta.last_row_id;
     const photos=Array.isArray(data.photos)?data.photos.slice(0,4):[];
     if(photos.length){
       await db.batch(photos.map(fileId=>db.prepare(
         "INSERT OR IGNORE INTO custom_attachments(order_id,telegram_file_id) VALUES(?,?)").bind(orderId,fileId)));
     }
-    await send(id,"Тестовая заявка на индивидуальный пошив №"+orderId+" получена. Цену и сроки согласует менеджер.");
-    await notify("Новая демо-заявка на пошив №"+orderId+"; референсов: "+photos.length+". /admin");
+    try{await deliverOutbox(env,{orderId})}catch{console.warn("Notification delivery deferred")}
     for(const admin of admins){
       for(const fileId of photos){
         try{await api("sendPhoto",{chat_id:admin,photo:fileId,caption:"Референс к заявке №"+orderId})}
@@ -153,7 +157,7 @@ export function makeHandler(env) {
     if(!v){await send(id,"Введите текст или используйте /cancel.");return true}
     if(s.flow==="checkout"){
       if(s.step==="name"){d.name=v.slice(0,160);await setSession(id,"checkout","phone",d);await send(id,"Укажите телефон или другой контакт:");return true}
-      if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"checkout","address",d);await send(id,"Адрес доставки или «самовывоз»:");return true}
+      if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"checkout","address",d);await send(id,"Получение: самовывоз у метро Беляево, место и время согласуете с менеджером. Напишите удобное время или «ок»:");return true}
       if(s.step==="address"){
         // Only one final message may consume this checkout session.
         const claim=await run(db,"DELETE FROM sessions WHERE telegram_id=? AND flow='checkout' AND step='address'",id);
@@ -165,7 +169,7 @@ export function makeHandler(env) {
       if(s.step==="details"){if(v.length<10){await send(id,"Описание должно содержать не меньше 10 символов.");return true}d.details=v;await setSession(id,"custom","measures",d);await send(id,"Укажите мерки или «нужна консультация»:");return true}
       if(s.step==="measures"){d.measures=v;await setSession(id,"custom","name",d);await send(id,"Ваше имя:");return true}
       if(s.step==="name"){d.name=v.slice(0,160);await setSession(id,"custom","phone",d);await send(id,"Контактный телефон или Telegram:");return true}
-      if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"custom","address",d);await send(id,"Город и способ получения:");return true}
+      if(s.step==="phone"){d.phone=v.slice(0,160);await setSession(id,"custom","address",d);await send(id,"Получение: самовывоз у метро Беляево. Напишите удобное время или «ок»:");return true}
       if(s.step==="address"){
         const claim=await run(db,"DELETE FROM sessions WHERE telegram_id=? AND flow='custom' AND step='address'",id);
         if(claim.meta.changes!==1)return true;
@@ -228,7 +232,7 @@ export function makeHandler(env) {
   }
   async function adminCommand(id,u,txt){
     const p=txt.split(/\s+/),cmd=p[0].split("@")[0];
-    if(cmd==="/admin")return send(id,"Управление демо:\n/orders — заказы\n/order ID — детали\n/status ID статус — сменить\n/return ID ПОЛУЧЕНО — учесть физический возврат отправленного товара\n/quote ID цена себестоимость — смета\n/payment ID received|refunded сумма [номер] — ручной учёт\n/report — Excel\n/stats — сводка");
+    if(cmd==="/admin")return send(id,(demo(env)?"Управление демо:":"Управление:")+"\n/orders — заказы\n/order ID — детали\n/status ID статус — сменить\n/return ID ПОЛУЧЕНО — учесть физический возврат отправленного товара\n/quote ID цена себестоимость — смета\n/payment ID received|refunded сумма [номер] — ручной учёт\n/report — Excel\n/stats — сводка");
     if(cmd==="/orders"){
       const filter=p[1],valid=!filter||statuses.includes(filter);
       if(!valid)return send(id,"Неизвестный статус.");
@@ -511,7 +515,7 @@ export default {
       const headers=new Headers(asset.headers);
       headers.set("Content-Security-Policy",
         "default-src 'self'; script-src 'self' https://telegram.org; "+
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "+
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; "+
         "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
       headers.set("Referrer-Policy","no-referrer");
       headers.set("X-Content-Type-Options","nosniff");
@@ -530,10 +534,15 @@ export default {
   },
   async scheduled(event,env,ctx){
     if(!env.DB)return;
+    await deliverOutbox(env);
+    // Workers Free limits cron triggers per account, so one schedule also runs the daily cleanup.
+    const now=new Date(event.scheduledTime);
+    if(event.cron&&!(now.getUTCHours()===2&&now.getUTCMinutes()===15))return;
     // Bounded retention for technical metadata; customer orders are preserved.
     await env.DB.batch([
       env.DB.prepare("DELETE FROM processed_updates WHERE processed_at < datetime('now','-14 days')"),
       env.DB.prepare("DELETE FROM sessions WHERE updated_at < datetime('now','-30 days')"),
+      env.DB.prepare("DELETE FROM notification_outbox WHERE delivered_at < datetime('now','-30 days')"),
       env.DB.prepare("DELETE FROM checkout_requests WHERE created_at < datetime('now','-90 days')")
     ]);
   }

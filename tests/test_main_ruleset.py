@@ -90,3 +90,25 @@ def test_default_does_not_mutate_and_apply_requires_admin_token(monkeypatch):
     monkeypatch.setattr(module, "request", lambda *args, **kwargs: (_ for _ in ()).throw(
         AssertionError("network forbidden in --plan")))
     assert module.main(["--plan"]) == 0
+
+
+def test_required_contexts_are_from_always_on_pull_request_jobs():
+    policy = module.expected_policy()
+    required = {x["context"] for x in module.rule_map(policy)["required_status_checks"]
+                ["parameters"]["required_status_checks"]}
+    assert required == {
+        "Seeded state-machine / mutation detection",
+        "Full Node regression and fault injection",
+        "pytest (3.11)", "pytest (3.12)", "pytest (3.13)",
+        "CodeQL / javascript-typescript", "CodeQL / python",
+    }
+    for path in [".github/workflows/reliability.yml",
+                 ".github/workflows/tests.yml",
+                 ".github/workflows/codeql.yml"]:
+        content = (ROOT / path).read_text("utf-8")
+        assert "\n  pull_request:" in content, f"{path} must run on every PR"
+        assert "\n    paths:" not in content, f"{path} must not filter PR paths"
+    # Path-filtered browser and Cloudflare checks are valuable optional
+    # signals, but MUST NOT be required for docs-only PRs (pending forever).
+    assert "Mobile and desktop synthetic catalogue" not in required
+    assert "worker" not in required

@@ -1,6 +1,6 @@
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
-const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders"};
+const state={catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
 if(app){try{app.ready();app.expand();app.setHeaderColor("#f7f5f1");app.setBackgroundColor("#f7f5f1")}catch{}}
 const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -22,8 +22,13 @@ const canUse=()=>Boolean(state.me?.admin||(!state.me?.demo&&state.me?.user));
 function go(view){
   if(view==="admin"&&!state.me?.admin){toast("Управление доступно только администратору",true);return}
   state.view=view;
+  document.body.classList.toggle("is-inner-view",view!=="catalog");
   document.querySelectorAll(".view").forEach(e=>e.classList.toggle("active",e.id==="view-"+view));
-  document.querySelectorAll("[data-view]").forEach(e=>e.classList.toggle("selected",e.dataset.view===view));
+  document.querySelectorAll("[data-view]").forEach(e=>{
+    const active=e.dataset.view===view;
+    e.classList.toggle("selected",active);
+    e.setAttribute("aria-pressed",String(active));
+  });
   if(view==="cart")safeRun(loadCart);
   if(view==="admin"&&state.me?.admin)safeRun(loadAdmin);
   window.scrollTo({top:0,behavior:"smooth"});
@@ -33,21 +38,26 @@ async function loadCatalog(){
   state.catalog=await api("/api/catalog");
   $("product-count").textContent=(state.catalog.products.length||0)+" изделий";
   const categories=[{id:0,name:"Всё"},...state.catalog.categories];
-  $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
+  $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
   renderProducts();
 }
 function renderProducts(){
+  if(!state.catalog){
+    $("products").innerHTML='<div class="card padded empty">Не удалось загрузить коллекцию. <button class="quiet" type="button" data-retry-catalog>Повторить загрузку</button></div>';
+    return;
+  }
   const list=state.catalog.products.filter(p=>!state.category||p.category_id===state.category);
   $("products").innerHTML=list.length?list.map((p,idx)=>{
     const variants=state.catalog.variants.filter(v=>v.product_id===p.id&&v.stock>0);
-    const choice=state.selected[p.id]||variants[0]?.id;
+    const remembered=state.selected[p.id];
+    const choice=variants.find(v=>v.id===remembered)?.id??variants[0]?.id;
     state.selected[p.id]=choice;
-    const minimum=Math.min(...variants.map(v=>v.price_cents));
+    const selectedPrice=variants.find(v=>v.id===choice)?.price_cents;
     return '<article class="product-card"><div class="product-photo p'+((idx%3)+1)+'">'+
-      '<span class="photo-tag">ДЕМО · '+esc(categoryName(p.category_id))+'</span><span class="symbol">'+(p.photo_available?'<img class="product-image" loading="lazy" alt="'+esc(p.name)+'" src="/media/product/'+p.id+'">':(["A.","✦","○"][idx%3]))+'</span></div>'+
+      '<span class="photo-tag">ДЕМО · '+esc(categoryName(p.category_id))+'</span><span class="symbol">'+(p.photo_available?'<img class="product-image" loading="lazy" alt="'+esc(p.name)+'" src="/media/product/'+p.id+'">':"Фото готовится")+'</span></div>'+
       '<div class="product-details"><h3>'+esc(p.name)+'</h3><p>'+esc(p.description)+'</p>'+
-      '<div class="price">'+(variants.length?money(minimum):"Нет в наличии")+'</div>'+
-      '<div class="variants">'+variants.map(v=>'<button class="variant-pill '+(choice===v.id?"selected":"")+'" data-choice="'+v.id+'" data-product="'+p.id+'" type="button">'+esc(v.size)+' · '+esc(v.color)+'</button>').join("")+'</div>'+
+      '<div class="price">'+(variants.length?money(selectedPrice):"Нет в наличии")+'</div>'+
+      '<div class="variants">'+variants.map(v=>'<button class="variant-pill '+(choice===v.id?"selected":"")+'" aria-pressed="'+(choice===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'" type="button">'+esc(v.size)+' · '+esc(v.color)+'</button>').join("")+'</div>'+
       '<button class="add-button" data-add="'+p.id+'" '+(!variants.length?"disabled":"")+'>'+(canUse()?"В корзину +":"Посмотреть в Telegram ↗")+'</button></div></article>'
   }).join(""):'<div class="card padded empty">Изделия этой категории пока не добавлены.</div>';
 }
@@ -58,7 +68,7 @@ async function loadMe(){
     return;
   }
   const result=await safeRun(()=>api("/api/me"));
-  if(!result)return;
+  if(!result){renderProducts();return;}
   state.me=result;
   if(result.admin){
     $("admin-nav").hidden=false;
@@ -79,17 +89,21 @@ async function loadCart(){
     $("cart-body").innerHTML='<div class="empty">Пока пусто. Выберите изделие в каталоге.</div>';
     $("checkout-form").hidden=true;return;
   }
-  $("cart-body").innerHTML=state.cart.items.map(x=>'<div class="cart-row"><div><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small></div><div class="qty-buttons">'+
+  const hasUnavailable=state.cart.items.some(x=>Number(x.available)===0);
+  $("cart-body").innerHTML=(hasUnavailable?'<div class="notice" role="alert">Некоторые изделия недоступны или их осталось меньше, чем в корзине. Уменьшите количество или удалите эти позиции перед оформлением.</div>':"")+
+    state.cart.items.map(x=>'<div class="cart-row"><div><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small>'+
+    (Number(x.available)===0?'<small class="error">Временно недоступно — уменьшите количество или удалите</small>':"")+
+    '</div><div class="qty-buttons">'+
     '<button data-qty="'+x.variant_id+'" data-delta="-1" aria-label="Уменьшить">−</button><span>'+x.quantity+'</span>'+
     '<button data-qty="'+x.variant_id+'" data-delta="1" aria-label="Добавить">+</button></div></div>').join("")+
     '<div class="cart-total"><span>Итого</span><span>'+money(state.cart.total_cents)+'</span></div>';
-  $("checkout-form").hidden=false;
+  $("checkout-form").hidden=hasUnavailable;
 }
 async function loadAdmin(){
   state.dashboard=await api("/api/admin/dashboard");
   const m=state.dashboard.metrics;
   $("metrics").innerHTML=[
-    ["Заказов",String(m.orderCount),"за всё время (до 100)"],
+    ["Заказов",String(m.orderCount),"за всё время"],
     ["Новые",String(m.ordersByStatus.new||0),"требуют внимания"],
     ["Учётные поступления",money(m.paidNetCents),"вручную, не от банка"],
     ["Мало на складе",String(m.lowStockCount),"варианты ≤ 3 шт."]
@@ -142,7 +156,8 @@ function renderPanel(){
   }
 }
 function field(label,name,value,type="text"){
-  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'" required></label>';
+  const extra=type==="number"?' min="0" step="'+(name==="stock"?"1":"0.01")+'"':"";
+  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'"'+extra+' required></label>';
 }
 function openEditor(kind,id=0,selectedProductId=0){
   if(!state.me?.admin)return;
@@ -178,7 +193,7 @@ function openEditor(kind,id=0,selectedProductId=0){
        (Number(o.return_receipt_count)>0?'<p class="success">Возврат изделия уже учтён.</p>':
         '<div class="return-form"><label>Примечание о приёмке<input name="returnNote" maxlength="300" placeholder="Где и кем получен товар"></label><label class="return-check"><input type="checkbox" name="returnConfirm"> Подтверждаю фактическое получение возвращённого изделия</label><button class="quiet" type="button" data-inventory-return="'+o.id+'">Учесть возврат на склад</button></div>'):"")+
       '<label>Новый статус<select name="status"><option value="">Без изменения</option>'+(next[o.status]||[]).map(st=>'<option value="'+st+'">'+esc(labels[st])+'</option>').join("")+'</select></label>'+
-      (o.kind==="custom"&&o.status==="new"?'<label>Предложить цену, ₽<input type="number" min="1" name="quoteRub" placeholder="Например, 8000"></label><label>Себестоимость, ₽<input type="number" min="0" name="costRub" placeholder="Например, 3400"></label>':'');
+      (o.kind==="custom"&&o.status==="new"?'<label>Предложить цену, ₽<input type="number" min="1" step="0.01" name="quoteRub" placeholder="Например, 8000"></label><label>Себестоимость, ₽<input type="number" min="0" step="0.01" name="costRub" placeholder="Например, 3400"></label>':'');
   }
   dialog.dataset.kind=kind;
   dialog.dataset.id=String(id);
@@ -225,17 +240,36 @@ async function init(){
   $("filters").addEventListener("click",e=>{
     const target=e.target.closest("[data-cat]");if(!target)return;
     state.category=Number(target.dataset.cat);
-    document.querySelectorAll("[data-cat]").forEach(x=>x.classList.toggle("selected",x===target));renderProducts();
+    document.querySelectorAll("[data-cat]").forEach(x=>{
+      x.classList.toggle("selected",x===target);
+      x.setAttribute("aria-pressed",String(x===target));
+    });renderProducts();
   });
   $("products").addEventListener("click",e=>{
+    if(e.target.closest("[data-retry-catalog]")){safeRun(loadCatalog);return}
     const select=e.target.closest("[data-choice]");
     if(select){state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);renderProducts();return}
     const add=e.target.closest("[data-add]");
     if(add)safeRun(async()=>{
-      if(!canUse()){toast("Тестовые заказы доступны только администратору Telegram",true);return}
+      if(!canUse()){
+        const botUrl="https://t.me/atelier_customwear_2611_bot";
+        if(app?.openTelegramLink)app.openTelegramLink(botUrl);
+        else window.open(botUrl,"_blank","noopener,noreferrer");
+        return;
+      }
       const variantId=state.selected[Number(add.dataset.add)];
       if(!variantId)return;
-      await api("/api/cart","POST",{variantId,delta:1});toast("Добавлено в корзину");await loadCart();
+      if(state.pendingCart)return;
+      state.pendingCart=true;
+      add.disabled=true;
+      try{
+        await api("/api/cart","POST",{variantId,delta:1});
+        toast("Добавлено в корзину");
+        await loadCart();
+      }finally{
+        state.pendingCart=false;
+        add.disabled=false;
+      }
     });
   });
   $("cart-body").addEventListener("click",e=>{
@@ -244,23 +278,30 @@ async function init(){
   });
   $("checkout-form").addEventListener("submit",e=>{
     e.preventDefault();
+    const form=e.currentTarget,submit=form.querySelector('[type="submit"]');
+    if(submit?.disabled)return;
+    if(submit)submit.disabled=true;
     safeRun(async()=>{
       if(!canUse())throw Error("Войдите через Telegram");
-      const form=e.currentTarget,fd=new FormData(form);
+      const fd=new FormData(form);
       state.requestKey ||= crypto.randomUUID().replace(/-/g,"");
       const result=await api("/api/checkout","POST",{requestKey:state.requestKey,name:fd.get("name"),phone:fd.get("phone"),address:fd.get("address")});
       toast("Тестовый заказ №"+result.orderId+" создан");state.requestKey=null;form.reset();await loadCart();go("catalog");
-    })
+    }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("tailor-form").addEventListener("submit",e=>{
-    e.preventDefault();safeRun(async()=>{
+    e.preventDefault();
+    const form=e.currentTarget,submit=form.querySelector('[type="submit"]');
+    if(submit?.disabled)return;
+    if(submit)submit.disabled=true;
+    safeRun(async()=>{
       if(!canUse())throw Error("Заявка доступна только в Telegram-демо");
-      const form=e.currentTarget,fd=new FormData(form);
+      const fd=new FormData(form);
       state.tailorRequestKey ||= crypto.randomUUID().replace(/-/g,"");
       const result=await api("/api/custom","POST",{...Object.fromEntries(fd),requestKey:state.tailorRequestKey});
       state.tailorRequestKey=null;
       toast("Заявка №"+result.orderId+" зарегистрирована");form.reset();
-    })
+    }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("panel-tabs").addEventListener("click",e=>{const b=e.target.closest("[data-panel]");if(b){state.panel=b.dataset.panel;renderPanel()}});
   $("admin-data").addEventListener("click",e=>{
@@ -305,6 +346,7 @@ async function init(){
   });
   $("editor-form").addEventListener("submit",saveEditor);
   await safeRun(loadCatalog);
+  if(!state.catalog)renderProducts();
   await loadMe();
   await safeRun(loadCart);
 }

@@ -23,3 +23,6 @@ cloudflare/test/test-workbook.xlsx
 
 # Private D1 exports (encrypted for this Windows user)
 backups/
+
+# Generated Chrome CDP artifacts; selected screenshots live in docs/visual-qa/
+/out/visual-qa/

@@ -31,6 +31,9 @@ const COMMANDS=[
   ["custom","Заказать пошив"],["reviews","Отзывы покупателей"],["help","Что умеет бот"],["privacy","Данные и условия"],["cancel","Отменить ввод"]
 ];
 const HELP="Что можно сделать:\n\n/catalog — посмотреть вещи с фото и выбрать размер\n/cart — корзина и оформление заказа\n/custom — заказать пошив по своей идее\n/orders — ваши заказы\n/reviews — отзывы покупателей\n/privacy — данные и условия\n/cancel — отменить ввод\n\nОплату и встречу у метро Беляево вы согласуете с менеджером в Telegram: @onlyrazor.";
+const MENU={"🛍 Каталог":"catalog","🧺 Корзина":"cart","✂️ Пошив":"custom","📦 Мои заказы":"orders","⭐ Отзывы":"reviews","❓ Помощь":"help"};
+const MENU_KEYBOARD={keyboard:[["🛍 Каталог","🧺 Корзина"],["✂️ Пошив","📦 Мои заказы"],["⭐ Отзывы","❓ Помощь"]].map(row=>row.map(text=>({text}))),
+  resize_keyboard:true,is_persistent:true,input_field_placeholder:"Выберите раздел внизу"};
 const chatPhoto=path=>SHOP+String(path).replace(/\.webp$/,".jpg");
 const firstImage=p=>{try{return JSON.parse(p.images||"[]")[0]||null}catch{return null}};
 export function makeHandler(env) {
@@ -66,8 +69,18 @@ export function makeHandler(env) {
   const pickupButtons=()=>fillButtons(["Договоримся с менеджером","fill:later"]);
   const sendWithPhoto=async(id,path,caption,reply_markup)=>{
     if(path){
-      try{return await api("sendPhoto",{chat_id:id,photo:chatPhoto(path),caption:String(caption).slice(0,1000),...(reply_markup?{reply_markup}:{})})}
-      catch{console.warn("Product photo unavailable")}
+      const extra={caption:String(caption).slice(0,1000),...(reply_markup?{reply_markup}:{})};
+      const known=await first(db,"SELECT file_id FROM photo_cache WHERE path=?",path);
+      if(known){
+        try{return await api("sendPhoto",{chat_id:id,photo:known.file_id,...extra})}
+        catch{console.warn("Cached photo rejected")}
+      }
+      try{
+        const sent=await api("sendPhoto",{chat_id:id,photo:chatPhoto(path),...extra});
+        const fileId=sent?.photo?.at?.(-1)?.file_id;
+        if(fileId)await run(db,"INSERT INTO photo_cache(path,file_id) VALUES(?,?) ON CONFLICT(path) DO UPDATE SET file_id=excluded.file_id",path,fileId);
+        return sent;
+      }catch{console.warn("Product photo unavailable")}
     }
     return send(id,caption,reply_markup);
   };
@@ -91,21 +104,19 @@ export function makeHandler(env) {
         body.append("photo",JSON.stringify({type:"static",photo:"attach://avatar"}));
         body.append("avatar",new Blob([await image.arrayBuffer()],{type:"image/jpeg"}),"avatar.jpg");
         const r=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/setMyProfilePhoto",{method:"POST",body});
-        if(!r.ok)throw new Error("Avatar rejected");
+        const result=await r.json().catch(()=>null);
+        if(!r.ok||result?.ok!==true)throw new Error(result?.description||"Avatar rejected");
       }]
     ];
     const report=[];
     for(const [name,step] of steps){
-      try{await step();report.push(name+": готово")}catch{report.push(name+": не получилось")}
+      try{await step();report.push(name+": готово")}catch(e){report.push(name+": не получилось"+(name==="аватарка"?" ("+String(e?.message||"").slice(0,120)+")":""))}
     }
     return report.join("\n");
   }
-  const home=id=>{
-    const buttons=kb([
-      ["Каталог","cats"],["Корзина","cart"],["Индивидуальный пошив","custom"],["Мои заказы","mine"],["Отзывы","reviews"],["Помощь","help"]
-    ]);
-    buttons.inline_keyboard.unshift([shopButton("Открыть витрину")]);
-    return send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Привет! Это ателье авторской одежды.\n\nВ витрине удобнее всего смотреть вещи и оставлять отзывы. Здесь в чате тоже можно выбрать вещь, оформить заказ или пошив.\n\nПосле заказа вы договоритесь с менеджером об оплате и встрече у метро Беляево.",buttons);
+  const home=async id=>{
+    await send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Привет! Это ателье авторской одежды.\n\nРазделы — на кнопках внизу экрана. Выберите вещь, оформите заказ или пошив, а об оплате и встрече у метро Беляево договоритесь с менеджером.",MENU_KEYBOARD);
+    return send(id,"Вещи с фото и отзывы удобнее смотреть в витрине:",{inline_keyboard:[[shopButton("Открыть витрину")]]});
   };
   async function catalogue(id) {
     const cs=await rows(db,"SELECT c.id,c.name,COUNT(p.id) AS items FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.active=1 GROUP BY c.id ORDER BY c.name");
@@ -360,7 +371,6 @@ export function makeHandler(env) {
   }
   async function callback(cb){
     const u=cb.from,id=u.id,data=String(cb.data||"");
-    await answer(cb.id);
     if(data==="home"){await delSession(id);return home(id)}
     if(data==="cats")return catalogue(id);
     if(data==="cart")return cart(id,u);
@@ -457,10 +467,20 @@ export function makeHandler(env) {
       return send(id,"Референс сохранён ("+photos.length+"/4). Продолжайте заполнение заявки.");
     }
     if(!txt)return;
+    const pressed=MENU[txt];
+    if(pressed){
+      // A menu button always wins over a half-finished form.
+      await delSession(id);
+      if(pressed==="catalog")return catalogue(id);
+      if(pressed==="cart")return cart(id,u);
+      if(pressed==="custom")return startCustom(id);
+      if(pressed==="orders")return allMine(id,u);
+      if(pressed==="reviews")return reviewsMessage(id);
+      return send(id,HELP);
+    }
     const cmd=txt.split(/\s+/)[0].split("@")[0].toLowerCase();
     if(cmd==="/start"){
       await delSession(id);await customer(u);
-      if(admins.has(id))try{await setupBot()}catch{console.warn("Bot setup deferred")}
       const photoMatch=txt.match(/^\/start\s+photo_([1-9][0-9]{0,10})$/);
       if(photoMatch&&admins.has(id))return beginProductPhoto(id,safeInt(photoMatch[1]));
       return home(id);
@@ -518,6 +538,8 @@ export function makeHandler(env) {
         else if(update.message?.chat?.type==="private")await send(update.message.chat.id,"Магазин пока в тестовом режиме. Реальные заказы не принимаются.");
         return;
       }
+      // Stop the button spinner before any database work so a press feels immediate.
+      if(update.callback_query){try{await answer(update.callback_query.id)}catch{console.warn("Callback answer unavailable")}}
       const dedup=await run(db,"INSERT OR IGNORE INTO processed_updates(update_id) VALUES(?)",update.update_id);
       if(dedup.meta.changes===0)return;
       try{
@@ -605,10 +627,15 @@ export default {
       headers.set("Cache-Control","no-store");
       return new Response(asset.body,{status:asset.status,headers});
     }
-    if(url.pathname!=="/webhook"||request.method!=="POST")
-      return request.method==="GET"&&env.ASSETS
-        ? env.ASSETS.fetch(request)
-        : new Response("Not Found",{status:404});
+    if(url.pathname!=="/webhook"||request.method!=="POST"){
+      if(request.method!=="GET"||!env.ASSETS)return new Response("Not Found",{status:404});
+      const file=await env.ASSETS.fetch(request);
+      // Photos and fonts rarely change, so phones should not fetch them again on every open.
+      if(!file.ok||!/^\/(products|brand|fonts)\//.test(url.pathname))return file;
+      const cached=new Response(file.body,file);
+      cached.headers.set("Cache-Control","public, max-age=604800");
+      return cached;
+    }
     if(!env.WEBHOOK_SECRET||request.headers.get("X-Telegram-Bot-Api-Secret-Token")!==env.WEBHOOK_SECRET)
       return new Response("Forbidden",{status:403});
     let update;

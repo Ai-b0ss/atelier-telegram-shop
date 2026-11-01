@@ -2,7 +2,8 @@ import {productCountLabel, syncTelegramBackButton, configureTelegramBackNavigati
 const $=id=>document.getElementById(id);
 const app=window.Telegram?.WebApp;
 const state={reviews:{},reviewDraft:{rating:0,text:""},catalog:null,cart:null,me:null,dashboard:null,view:"catalog",category:0,selected:{},requestKey:null,panel:"orders",pendingCart:false};
-if(app){try{app.ready();app.expand();app.setHeaderColor("#f3f0e9");app.setBackgroundColor("#f3f0e9")}catch{}}
+// Photo swipes and sheet scrolling must not minimise the app.
+if(app){try{app.ready();app.expand();app.disableVerticalSwipes?.();app.setHeaderColor("#f3f0e9");app.setBackgroundColor("#f3f0e9")}catch{}}
 const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=amount=>new Intl.NumberFormat("ru-RU",{style:"currency",currency:"RUB",minimumFractionDigits:0,maximumFractionDigits:2}).format((Number(amount)||0)/100);
@@ -56,11 +57,11 @@ function go(view){
   if(view==="cart")safeRun(loadCart);
   if(view==="reviews")safeRun(loadAllReviews);
   if(view==="admin"&&state.me?.admin)safeRun(loadAdmin);
-  window.scrollTo({top:0,behavior:"smooth"});
+  window.scrollTo(0,0);
 }
 const categoryName=id=>state.catalog?.categories?.find(c=>c.id===id)?.name||"Коллекция";
-async function loadCatalog(){
-  state.catalog=await api("/api/catalog");
+const CATALOG_KEY="atelier-catalog";
+function showCatalog(){
   applyMode();
   $("product-count").textContent=productCountLabel(state.catalog.products.length);
   const stocked=new Set(state.catalog.products.map(p=>p.category_id));
@@ -68,6 +69,18 @@ async function loadCatalog(){
   $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
   renderProducts();
   renderHero();
+}
+async function loadCatalog(){
+  state.catalog=await api("/api/catalog");
+  try{localStorage.setItem(CATALOG_KEY,JSON.stringify(state.catalog))}catch{}
+  showCatalog();
+}
+// The last catalogue appears at once on reopen; orders are still checked by the server.
+function restoreCatalog(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(CATALOG_KEY)||"null");
+    if(saved?.products&&saved?.categories&&saved?.variants){state.catalog=saved;showCatalog()}
+  }catch{}
 }
 const heroState={slides:[],at:0,timer:0};
 const SLIDE_MS=5000;
@@ -493,9 +506,10 @@ async function init(){
       if(!variantId||state.pendingCart)return;
       state.pendingCart=true;
       add.disabled=true;
+      add.textContent="Добавляем…";
+      haptic("medium");
       try{
         await api("/api/cart","POST",{variantId,delta:1});
-        haptic("medium");
         closeSheet();
         toast("Добавлено в корзину");
         await loadCart();
@@ -583,9 +597,11 @@ async function init(){
     });
   });
   $("editor-form").addEventListener("submit",saveEditor);
-  await safeRun(loadCatalog);
+  restoreCatalog();
+  const catalogReady=safeRun(loadCatalog);
   if(!state.catalog)renderProducts();
-  await loadMe();
+  await Promise.all([loadMe(),catalogReady]);
+  if(state.openProduct&&$("product-sheet").open)openSheet(state.openProduct);
   await safeRun(loadCart);
 }
 init();

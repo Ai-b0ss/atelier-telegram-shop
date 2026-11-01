@@ -72,9 +72,9 @@ jobs:
           from pathlib import Path
           config=json.loads(Path("cloudflare/wrangler.jsonc").read_text("utf-8"))
           vars=config.get("vars", {})
-          assert vars.get("DEMO_MODE") == "1", "Demo must remain enabled in versioned deployment config"
-          assert vars.get("STORE_READY") != "1", "Sales must not be enabled by a code merge"
-          print("Versioned Worker configuration is demo-only")
+          assert vars.get("DEMO_MODE") == "0", "The live store must not return to demo through a code change"
+          assert vars.get("STORE_READY") == "1", "The live store must keep sales enabled"
+          print("Versioned Worker configuration is the live store")
           PY
 
   incident:

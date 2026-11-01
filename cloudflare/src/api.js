@@ -79,10 +79,12 @@ export async function handleApi(request,env,url){
   if(!env.DB||!env.BOT_TOKEN)return err("Service unavailable",503);
   const path=url.pathname;
   if(request.method==="GET"&&path==="/api/catalog"){
-    const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
-    const products=await rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,p.images,p.size_chart,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY photo_available DESC,p.id LIMIT 150").then(list=>list.map(withGallery));
-    const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600");
-    const ratings=await rows(env.DB,"SELECT product_id,ROUND(AVG(rating),1) AS rating,COUNT(*) AS reviews FROM reviews WHERE hidden=0 GROUP BY product_id");
+    const [categories,products,variants,ratings]=await Promise.all([
+      rows(env.DB,"SELECT id,name FROM categories ORDER BY id"),
+      rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,p.images,p.size_chart,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY photo_available DESC,p.id LIMIT 150").then(list=>list.map(withGallery)),
+      rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600"),
+      rows(env.DB,"SELECT product_id,ROUND(AVG(rating),1) AS rating,COUNT(*) AS reviews FROM reviews WHERE hidden=0 GROUP BY product_id")
+    ]);
     const rated=new Map(ratings.map(x=>[x.product_id,x]));
     const withRating=products.map(p=>({...p,rating:rated.get(p.id)?.rating??null,reviews:rated.get(p.id)?.reviews??0}));
     return json({ok:true,demo:demoMode(env),manager:managerUsername(env),categories,products:withRating,variants});

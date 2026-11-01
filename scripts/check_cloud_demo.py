@@ -6,6 +6,10 @@ Use with the existing demo deployment, not as proof of paid production readiness
 """
 from __future__ import annotations
 
+from email.parser import BytesHeaderParser
+import subprocess
+import tempfile
+from pathlib import Path
 import json
 import sys
 import time
@@ -16,9 +20,44 @@ BASE = "https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev"
 MAX_BYTES = 256 * 1024
 
 
+def _curl_get(path: str):
+    """Use Windows Schannel (OS trust store) instead of Python's mismatched CA chain.
+
+    No --insecure option. Never sends authentication, orders, or personal data.
+    """
+    with tempfile.TemporaryDirectory(prefix="atelier-health-") as folder:
+        header_file = Path(folder) / "headers"
+        body_file = Path(folder) / "body"
+        command = [
+            "curl.exe", "--silent", "--show-error", "--location", "--proto", "=https", "--proto-redir", "=https",
+            "--max-time", "12", "--max-filesize", str(MAX_BYTES + 1),
+            "--dump-header", str(header_file), "--output", str(body_file),
+            "--write-out", "%{http_code}", BASE + path,
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AssertionError(f"{path}: Windows curl unavailable ({type(exc).__name__})") from exc
+        if result.returncode:
+            raise AssertionError(f"{path}: Windows HTTPS check failed (curl {result.returncode})")
+        status = int(result.stdout.strip())
+        raw = header_file.read_bytes()
+        parts = [b for b in raw.replace(b"\r\n", b"\n").split(b"\n\n") if b.strip()]
+        if not parts:
+            raise AssertionError(f"{path}: missing HTTP headers")
+        lines = parts[-1].splitlines()
+        headers = BytesHeaderParser().parsebytes(b"\n".join(lines[1:]) + b"\n\n")
+        data = body_file.read_bytes()
+        if len(data) > MAX_BYTES:
+            raise AssertionError(f"{path}: response exceeded {MAX_BYTES} bytes")
+        return status, headers, data
+
+
 def get(path: str, attempts: int = 3):
     if not path.startswith("/") or path.startswith("//"):
         raise ValueError("Unsafe request path")
+    if sys.platform == "win32":
+        return _curl_get(path)
     for attempt in range(attempts):
         req = Request(BASE + path, headers={"User-Agent": "AtelierReadOnlyHealthCheck/1.0"})
         try:

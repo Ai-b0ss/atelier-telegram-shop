@@ -61,23 +61,31 @@ export async function handleApi(request,env,url){
     const b=await safeBody(request),variantId=integer(b.variantId),delta=integer(Math.abs(b.delta),1,20);
     if(!variantId||!delta||![1,-1].includes(b.delta))return err("Invalid cart item");
     const c=await getCustomer(env.DB,u);
-    const current=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
-    // A product may become inactive while it sits in an existing cart.
-    // Never trap a customer with an unremovable item: deletions do not
-    // require the variant or its parent product to remain on sale.
+    // Never do read-modify-write with stale quantity: two concurrent requests
+    // otherwise both return 200 but only one increment is recorded.
+    // Each decrement uses conditional SQL updates; removed/archive items
+    // remain removable, regardless of their current availability.
     if(b.delta===-1){
-      if(!current)return json({ok:true,quantity:0});
-      const quantity=current.quantity-1;
-      if(quantity===0)await run(env.DB,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
-      else await run(env.DB,"UPDATE cart_items SET quantity=? WHERE customer_id=? AND variant_id=?",quantity,c.id,variantId);
-      return json({ok:true,quantity});
+      const changed=await run(env.DB,
+        "UPDATE cart_items SET quantity=quantity-1 WHERE customer_id=? AND variant_id=? AND quantity>1",
+        c.id,variantId);
+      if(changed.meta.changes===0)await run(env.DB,
+        "DELETE FROM cart_items WHERE customer_id=? AND variant_id=? AND quantity=1",c.id,variantId);
+      const remaining=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+      return json({ok:true,quantity:remaining?.quantity||0});
     }
     const v=await first(env.DB,"SELECT v.stock,v.active,p.active AS product_active FROM variants v JOIN products p ON p.id=v.product_id WHERE v.id=?",variantId);
     if(!v||!v.active||!v.product_active)return err("Unavailable variant",404);
-    const q=(current?.quantity||0)+1;
-    if(q>v.stock)return err("Insufficient stock",409);
-    await run(env.DB,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,?) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=excluded.quantity",c.id,variantId,q);
-    return json({ok:true,quantity:q});
+    const added=await run(env.DB,
+      "INSERT INTO cart_items(customer_id,variant_id,quantity) "+
+      "SELECT ?,v.id,1 FROM variants v JOIN products p ON p.id=v.product_id "+
+      "WHERE v.id=? AND v.active=1 AND p.active=1 AND v.stock>0 "+
+      "ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=cart_items.quantity+1 "+
+      "WHERE cart_items.quantity < (SELECT stock FROM variants WHERE id=excluded.variant_id)",
+      c.id,variantId);
+    if(added.meta.changes!==1)return err("Insufficient stock or product unavailable",409);
+    const updated=await first(env.DB,"SELECT quantity FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,variantId);
+    return json({ok:true,quantity:updated?.quantity||0});
   }
   if(request.method==="POST"&&path==="/api/checkout"){
     const b=await safeBody(request),requestKey=text(b.requestKey,64);

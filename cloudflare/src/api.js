@@ -157,12 +157,12 @@ export async function handleApi(request,env,url){
           x.price_cents,x.cost_cents,c.id,x.quantity,c.id,Number(cartLines.n),x.quantity,x.variant_id)),
         ...items.map(x=>dbStatement(env.DB,
           "INSERT INTO order_items(order_id,variant_id,product_name,size,color,quantity,unit_price_cents,unit_cost_cents) "+
-          "VALUES((SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?),?,?,?,?,?,?,?)",
+          "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),?,?,?,?,?,?,?)",
           u.id,requestKey,x.variant_id,x.name,x.size,x.color,x.quantity,x.price_cents,x.cost_cents)),
         dbStatement(env.DB,"DELETE FROM cart_items WHERE customer_id=?",c.id),
         dbStatement(env.DB,
           "INSERT INTO status_history(order_id,new_status) "+
-          "VALUES((SELECT q.order_id,o.kind FROM checkout_requests q JOIN orders o ON o.id=q.order_id WHERE q.telegram_id=? AND q.request_key=?),'new')",
+          "VALUES((SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?),'new')",
           u.id,requestKey)
       ]);
       orderId=Number(results[0]?.meta?.last_row_id||0);

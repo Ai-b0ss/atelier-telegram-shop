@@ -56,8 +56,44 @@ function go(view){
   });
   if(view==="cart")safeRun(loadCart);
   if(view==="reviews")safeRun(loadAllReviews);
+  if(view==="orders")safeRun(loadOrders);
+  syncMainButton();
   if(view==="admin"&&state.me?.admin)safeRun(loadAdmin);
   window.scrollTo(0,0);
+}
+// Telegram's own bottom button is always reachable, even above the keyboard.
+const nativeCheckout=()=>Boolean(initData&&app?.MainButton&&app.isVersionAtLeast?.("6.1"));
+function syncMainButton(){
+  if(!nativeCheckout())return;
+  const form=$("checkout-form");
+  const ready=state.view==="cart"&&!form.hidden&&state.cart?.items?.length;
+  try{
+    if(ready){
+      app.MainButton.setText("Оформить заказ · "+money(state.cart.total_cents));
+      app.MainButton.show();
+    }else app.MainButton.hide();
+  }catch{}
+}
+const stepNames={new:"Принят",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов к выдаче",shipped:"Передан",completed:"Получен"};
+function orderSteps(order){
+  const seen=new Set(order.statuses||[]);
+  const steps=["new","confirmed","in_production","ready","shipped","completed"].filter(x=>{
+    if(x==="in_production")return order.kind==="custom"||seen.has(x)||order.status===x;
+    if(x==="shipped")return seen.has(x)||order.status===x;
+    return true;
+  });
+  const at=steps.indexOf(order.status);
+  return '<ol class="order-steps">'+steps.map((x,i)=>'<li class="'+(i<at?"was":i===at?"now":"")+'">'+esc(stepNames[x])+'</li>').join("")+'</ol>';
+}
+async function loadOrders(){
+  if(!canUse()){$("orders-list").innerHTML='<p class="review-note">Заказы доступны в Telegram.</p>';return}
+  const {orders}=await api("/api/orders");
+  $("orders-list").innerHTML=orders.length?orders.map(o=>'<article class="order-card"><div class="order-top"><b>Заказ №'+Number(o.id)+'</b><span>'+esc(reviewDate(o.created_at))+'</span></div>'+
+    (o.kind==="custom"?'<p>Пошив: '+esc(String(o.custom_details||"").slice(0,120))+'</p>':o.items.map(x=>'<p>'+esc(x.name)+', '+esc(x.size)+' × '+Number(x.quantity)+'</p>').join(""))+
+    (Number(o.total_cents)?'<p class="order-sum">'+money(o.total_cents)+'</p>':'<p class="order-sum">Цена согласуется</p>')+
+    (o.status==="canceled"?'<p class="order-canceled">Заказ отменён</p>':orderSteps(o))+
+    (o.managerUrl&&o.status!=="canceled"&&o.status!=="completed"?'<a class="quiet" href="'+esc(o.managerUrl)+'" data-manager-link>Написать менеджеру</a>':'')+
+    '</article>').join(""):'<p class="review-note">Заказов пока нет.</p>';
 }
 const categoryName=id=>state.catalog?.categories?.find(c=>c.id===id)?.name||"Коллекция";
 const CATALOG_KEY="atelier-catalog";
@@ -211,6 +247,7 @@ function showDone({title,text,url}){
   $("done-body").innerHTML='<svg class="done-mark" viewBox="0 0 72 72" aria-hidden="true"><circle cx="36" cy="36" r="30"/><path d="M24 37l8 8 16-18"/></svg>'+
     '<h2>'+esc(title)+'</h2><p>'+esc(text)+'</p>'+
     (url?'<a class="primary" href="'+esc(url)+'" data-manager-link>Написать менеджеру</a>':'')+
+    '<button type="button" class="quiet" data-view-link="orders">Мои заказы</button>'+
     '<button type="button" class="quiet" data-view-link="catalog">Вернуться в каталог</button>';
   haptic("success");
   go("done");
@@ -249,13 +286,13 @@ async function loadMe(){
 async function loadCart(){
   if(!canUse()){
     $("cart-body").innerHTML='<div class="empty">'+(isDemo()?"Магазин пока работает в тестовом режиме, заказы скоро откроются.":"Откройте магазин через Telegram, чтобы оформить заказ.")+'</div>';
-    $("checkout-form").hidden=true;return;
+    $("checkout-form").hidden=true;syncMainButton();return;
   }
   state.cart=await api("/api/cart");
   setCartCount(state.cart.items.reduce((n,x)=>n+x.quantity,0));
   if(!state.cart.items.length){
     $("cart-body").innerHTML='<div class="empty">Пока пусто. Выберите изделие в каталоге.</div>';
-    $("checkout-form").hidden=true;return;
+    $("checkout-form").hidden=true;syncMainButton();return;
   }
   const hasUnavailable=state.cart.items.some(x=>Number(x.available)===0);
   $("cart-body").innerHTML=(hasUnavailable?'<div class="notice" role="alert">Некоторые изделия недоступны или их осталось меньше, чем в корзине. Уменьшите количество или удалите эти позиции перед оформлением.</div>':"")+
@@ -266,6 +303,7 @@ async function loadCart(){
     '<button data-qty="'+x.variant_id+'" data-delta="1" aria-label="Добавить">+</button></div></div>').join("")+
     '<div class="cart-total"><span>Итого</span><span>'+money(state.cart.total_cents)+'</span></div>';
   $("checkout-form").hidden=hasUnavailable;
+  syncMainButton();
 }
 async function loadAdmin(){
   state.dashboard=await api("/api/admin/dashboard");
@@ -286,16 +324,18 @@ function renderPanel(){
   const d=state.dashboard;if(!d)return;
   if(state.panel==="orders")$("panel-orders").innerHTML='<div class="table-top"><h3>Последние заказы</h3><span class="muted">'+(isDemo()?"Тестовые операции":"")+'</span></div>'+
     '<div class="table-card"><table><thead><tr><th>Заказ</th><th>Вид</th><th>Статус</th><th>Сумма</th><th></th></tr></thead><tbody>'+d.orders.map(orderRow).join("")+'</tbody></table></div>';
-  if(state.panel==="catalog")$("panel-catalog").innerHTML='<div class="table-top"><h3>Ассортимент</h3><button class="quiet" data-create-product="1">+ Добавить изделие</button></div>'+
-    '<div class="table-card"><table><thead><tr><th>Название</th><th>Категория</th><th>Статус</th><th>Варианты</th><th></th></tr></thead><tbody>'+
+  if(state.panel==="catalog")$("panel-catalog").innerHTML='<div class="table-top"><h3>Ассортимент</h3><button class="quiet" data-create-product="1">+ Добавить вещь</button></div>'+
     d.products.map(p=>{
       const vs=d.variants.filter(x=>x.product_id===p.id);
-      return '<tr><td><strong>'+esc(p.name)+'</strong><small>'+esc(p.description.slice(0,80))+'</small></td><td>'+esc(p.category_name)+'</td><td>'+esc(p.active?"Активен":"Скрыт")+'</td><td>'+vs.map(v=>'<button class="link-action" data-variant="'+v.id+'">'+esc(v.size)+' / '+v.stock+' шт.</button>').join(" ")+'<button class="link-action" data-new-variant="'+p.id+'">+ Вариант</button></td><td><button class="link-action" data-product-edit="'+p.id+'">Изменить</button><button class="link-action" data-photo-product="'+p.id+'">Фото ↗</button></td></tr>'
-    }).join("")+'</tbody></table></div>';
+      return '<article class="stock-card'+(p.active?"":" is-hidden")+'"><div class="stock-head">'+(p.images?.[0]?'<img alt="" loading="lazy" src="'+esc(p.images[0])+'">':'<span class="stock-nophoto">Нет фото</span>')+
+        '<div><b>'+esc(p.name)+'</b><small>'+esc(p.category_name)+' · '+(p.active?"в каталоге":"скрыта")+'</small></div></div>'+
+        '<div class="stock-sizes">'+vs.map(v=>'<button class="size-chip'+(v.stock>0&&v.active?"":" is-out")+'" data-variant="'+v.id+'">'+esc(v.size)+' · '+v.stock+' шт. · '+money(v.price_cents)+'</button>').join("")+'<button class="size-chip" data-new-variant="'+p.id+'">+ Размер</button></div>'+
+        '<div class="stock-actions"><button class="link-action" data-product-edit="'+p.id+'">Изменить</button><button class="link-action" data-photo-product="'+p.id+'">Добавить фото ↗</button><button class="link-action" data-toggle-product="'+p.id+'">'+(p.active?"Скрыть":"Показать")+'</button></div></article>';
+    }).join("");
   if(state.panel==="settings"){
     const p=d.settings||{};
     $("panel-settings").innerHTML='<div class="analytics-grid"><form id="settings-form" class="card form-card"><h3>Данные продавца</h3>'+
-      '<p class="muted">Заполните достоверные реквизиты и условия до запуска продаж. Пустые поля допустимы в демо.</p>'+
+      '<p class="muted">Эти сведения видит покупатель. Заполните их перед настоящими продажами.</p>'+
       '<label>Наименование продавца<input name="legalName" maxlength="200" value="'+esc(p.legal_name||"")+'"></label>'+
       '<label>ИНН / регистрационный номер<input name="taxId" maxlength="80" value="'+esc(p.tax_id||"")+'"></label>'+
       '<label>Контакт для покупателей<input name="supportContact" maxlength="180" value="'+esc(p.support_contact||"")+'"></label>'+
@@ -311,7 +351,7 @@ function renderPanel(){
       '<div class="cart-row"><span>Реальные данные продавца</span><strong class="'+(p.legal_name&&p.tax_id?"success":"error")+'">'+(p.legal_name&&p.tax_id?"Заполнены":"Не заполнены")+'</strong></div>'+
       '<div class="cart-row"><span>Доставка и возвраты</span><strong class="'+(p.delivery_policy&&p.return_policy?"success":"error")+'">'+(p.delivery_policy&&p.return_policy?"Заполнены":"Не заполнены")+'</strong></div>'+
       '<div class="cart-row"><span>Политика обработки данных</span><strong class="'+(p.privacy_policy_url?"success":"error")+'">'+(p.privacy_policy_url?"Ссылка указана":"Не указана")+'</strong></div>'+
-      '<p class="small">Для открытия реальных заказов дополнительно требуется успешная приёмка, подтверждённый продавец и две независимые настройки развёртывания: DEMO_MODE=0 и STORE_READY=1. Из панели включить продажи нельзя.</p></div></div>';
+      ''
   }
   if(state.panel==="analytics"){
     const statuses=Object.entries(d.metrics.ordersByStatus);
@@ -323,9 +363,9 @@ function renderPanel(){
       '<div class="analytics-card"><h3>Экономика</h3><div class="cart-row"><span>Плановая выручка открытых заказов</span><b>'+money(d.metrics.bookedRevenueCents)+'</b></div><div class="cart-row"><span>Валовая маржа завершённых</span><b>'+money(d.metrics.grossMarginCents)+'</b></div><p class="small">Фактические банковские платежи не подключены. Метрики — только данные ручного учёта и тестовые заказы.</p></div></div>';
   }
 }
-function field(label,name,value,type="text"){
+function field(label,name,value,type="text",required=true){
   const extra=type==="number"?' min="0" step="'+(name==="stock"?"1":"0.01")+'"':"";
-  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'"'+extra+' required></label>';
+  return '<label>'+esc(label)+'<input type="'+type+'" name="'+esc(name)+'" value="'+esc(value??"")+'"'+extra+(required?' required':'')+'></label>';
 }
 function openEditor(kind,id=0,selectedProductId=0){
   if(!state.me?.admin)return;
@@ -337,17 +377,22 @@ function openEditor(kind,id=0,selectedProductId=0){
     $("editor-title").textContent=id?"Изменить изделие":"Новое изделие";
     html=field("Название","name",p.name)+
       '<label>Категория<select name="categoryId">'+d.categories.map(c=>'<option value="'+c.id+'" '+(c.id===p.category_id?"selected":"")+'>'+esc(c.name)+'</option>').join("")+'</select></label>'+
+      field("Или новая категория","newCategory","","text",false)+
       '<label>Описание<textarea name="description" rows="3">'+esc(p.description)+'</textarea></label>'+
+      '<label>Таблица размеров<select name="sizeChart"><option value="">Нет</option>'+[...new Set([...(d.sizeCharts||[]),...(p.size_chart?[p.size_chart]:[])])].map(x=>'<option value="'+esc(x)+'" '+(x===p.size_chart?"selected":"")+'>'+esc(x.split("/")[2]==="fire-hook-jeans"?"Джинсы":x.split("/")[2]==="why-always-drunk-tee"?"Футболка":x.split("/")[2])+'</option>').join("")+'</select></label>'+
+      (id?'<div class="photo-manage"><b>Фото</b><div>'+(p.images||[]).map((src,i)=>'<span><img alt="" src="'+esc(src)+'"><button type="button" data-remove-photo="'+i+'" data-product="'+id+'" aria-label="Убрать фото">×</button></span>').join("")+'</div><small>Добавить фото можно кнопкой «Фото» в списке изделий.</small></div>':
+       field("Размеры через запятую","sizes","S, M, L, XL")+field("Цвет","color","")+field("Цена, ₽","priceRub","","number")+field("Себестоимость, ₽","costRub","0","number")+field("Остаток каждого размера, шт.","stock","1","number")+'<small>Фото добавите кнопкой «Фото» после сохранения.</small>')+
       '<label><input type="checkbox" name="active" '+(p.active?"checked":"")+' style="width:auto;display:inline"> Показывать в каталоге</label>';
   }else if(kind==="variant"){
     const v=d.variants.find(x=>x.id===id);
     const current=v||{product_id:selectedProductId,sku:"",size:"one size",color:"",price_cents:0,cost_cents:0,stock:0,active:1};
     $("editor-title").textContent=v?"Изменить вариант":"Новый вариант";
     html='<label>Изделие<select name="productId">'+d.products.map(x=>'<option value="'+x.id+'" '+(x.id===current.product_id?"selected":"")+'>'+esc(x.name)+'</option>').join("")+'</select></label>'+
-      field("Артикул (латиница, цифры, - и _)","sku",current.sku)+field("Размер","size",current.size)+field("Цвет","color",current.color)+
+      field("Артикул (можно оставить пустым)","sku",current.sku,"text",false)+field("Размер","size",current.size)+field("Цвет","color",current.color)+
       field("Цена, ₽","priceRub",(current.price_cents/100).toFixed(2),"number")+
       field("Себестоимость, ₽","costRub",(current.cost_cents/100).toFixed(2),"number")+
       field("Остаток, шт.","stock",current.stock,"number")+
+      '<small>Нет в наличии — поставьте остаток 0.</small>'+
       '<label><input type="checkbox" name="active" '+(current.active?"checked":"")+' style="width:auto;display:inline"> Активный вариант</label>';
   }else if(kind==="order"){
     const o=d.orders.find(x=>x.id===id);if(!o)return;
@@ -376,7 +421,8 @@ async function saveEditor(e){
   const form=new FormData(e.currentTarget),get=k=>String(form.get(k)||"").trim();
   let path,body;
   if(kind==="product"){
-    path="/api/admin/product";body={id,name:get("name"),categoryId:Number(get("categoryId")),description:get("description"),active:form.has("active")};
+    path="/api/admin/product";body={id,name:get("name"),categoryId:Number(get("categoryId")),newCategory:get("newCategory"),description:get("description"),sizeChart:get("sizeChart"),active:form.has("active")};
+    if(!id)Object.assign(body,{sizes:get("sizes"),color:get("color"),priceCents:Math.round(Number(get("priceRub"))*100),costCents:Math.round(Number(get("costRub"))*100),stock:Number(get("stock"))});
   }else if(kind==="variant"){
     path="/api/admin/variant";body={id:state.dashboard.variants.some(x=>x.id===id)?id:0,productId:Number(get("productId")),
       sku:get("sku"),size:get("size"),color:get("color"),
@@ -522,7 +568,27 @@ async function init(){
   $("done-body").addEventListener("click",e=>{
     const link=e.target.closest("[data-manager-link]");
     if(link){e.preventDefault();openLink(link.href);return}
-    if(e.target.closest("[data-view-link]"))go("catalog");
+    const target=e.target.closest("[data-view-link]");
+    if(target)go(target.dataset.viewLink);
+  });
+  $("open-orders").addEventListener("click",()=>go("orders"));
+  $("orders-list").addEventListener("click",e=>{
+    const link=e.target.closest("[data-manager-link]");
+    if(link){e.preventDefault();openLink(link.href)}
+  });
+  if(nativeCheckout()){
+    $("checkout-submit").hidden=true;
+    app.MainButton.onClick(()=>$("checkout-form").requestSubmit());
+  }
+  $("editor-fields").addEventListener("click",e=>{
+    const remove=e.target.closest("[data-remove-photo]");
+    if(!remove)return;
+    const productId=Number(remove.dataset.product);
+    safeRun(async()=>{
+      await api("/api/admin/product/photo-remove","POST",{id:productId,index:Number(remove.dataset.removePhoto)});
+      await loadCatalog();await loadAdmin();
+      openEditor("product",productId);
+    });
   });
   $("cart-body").addEventListener("click",e=>{
     const b=e.target.closest("[data-qty]");
@@ -565,6 +631,13 @@ async function init(){
       else window.open(link,"_blank","noopener,noreferrer");
     }
     if(b.dataset.createProduct)openEditor("product",0);
+    if(b.dataset.toggleProduct){
+      const p=state.dashboard.products.find(x=>x.id===Number(b.dataset.toggleProduct));
+      if(p)safeRun(async()=>{
+        await api("/api/admin/product","POST",{id:p.id,name:p.name,description:p.description,categoryId:p.category_id,sizeChart:p.size_chart,active:!p.active});
+        await loadCatalog();await loadAdmin();
+      });
+    }
     if(b.dataset.variant)openEditor("variant",Number(b.dataset.variant));
     if(b.dataset.newVariant)openEditor("variant",0,Number(b.dataset.newVariant));
     if(b.dataset.order)openEditor("order",Number(b.dataset.order));

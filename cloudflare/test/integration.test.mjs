@@ -13,6 +13,7 @@ function database(){
   db.exec(readFileSync(new URL('../migrations/0003_store_readiness.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../migrations/0004_shipped_return.sql',import.meta.url),'utf8'));
   db.exec(readFileSync(new URL('../migrations/0006_product_gallery.sql',import.meta.url),'utf8'));
+  db.exec(readFileSync(new URL('../migrations/0009_uploaded_photos.sql',import.meta.url),'utf8'));
   return {
     raw: db,
     prepare(sql){

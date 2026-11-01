@@ -33,7 +33,7 @@
  <div class="product-grid" id="products" aria-busy="true"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>
 </section>
 <section id="view-cart" class="view">
- <div class="section-heading"><div><h2>Корзина</h2></div></div>
+ <div class="section-heading"><div><h2>Корзина</h2></div><button class="quiet" type="button" id="open-orders">Мои заказы</button></div>
  <div class="card padded" id="cart-body">Загрузка корзины…</div>
  <form id="checkout-form" class="card form-card" hidden>
  <h3>Оформление</h3><p class="muted" id="checkout-hint">Оплата в приложении не нужна: после заказа вы напишете менеджеру в Telegram и договоритесь об оплате и получении.</p>
@@ -58,6 +58,10 @@
  </form></div>
 </section>
 <section id="view-done" class="view"><div class="card done" id="done-body"></div></section>
+<section id="view-orders" class="view">
+ <div class="section-heading"><div><h2>Мои заказы</h2></div></div>
+ <div id="orders-list"><p class="review-note">Загружаем заказы…</p></div>
+</section>
 <section id="view-reviews" class="view">
  <div class="section-heading"><div><h2>Отзывы</h2></div><span id="reviews-count" class="section-count"></span></div>
  <div id="reviews-page"><p class="review-note">Загружаем отзывы…</p></div>

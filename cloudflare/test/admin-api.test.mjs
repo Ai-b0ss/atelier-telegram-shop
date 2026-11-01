@@ -18,7 +18,7 @@ function makeInitData(id=777,date=Math.floor(Date.now()/1000)){
 }
 function localDB(){
   const db=new DatabaseSync(":memory:");
-  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql"]){
+  for(const file of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql","migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql","migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql","migrations/0009_uploaded_photos.sql"]){
     db.exec(readFileSync(new URL("../"+file,import.meta.url),"utf8"));
   }
   return {
@@ -543,4 +543,45 @@ test("sign-in accepts current Telegram clients that sign the signature field too
   assert.equal(await verifyTelegramInitData(initData,"another-bot-token"),null);
   assert.equal(await verifyTelegramInitData(initData.replace("abc_DEF","xyz_DEF"),TOKEN),null,"tampering is refused");
   assert.equal(await verifyTelegramInitData(initData,TOKEN,now+90000),null,"a day-old session expires");
+});
+
+test("administrators create a full item in one form and manage its photos",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"100",DEMO_MODE:"0",STORE_READY:"1"};
+  const admin=makeInitData(100);
+  const created=await (await call(env,"/api/admin/product","POST",{name:"Куртка",description:"Лён",newCategory:"Куртки",sizes:"S, M, S",color:"чёрный",priceCents:900000,costCents:0,stock:2},admin)).json();
+  assert.equal(created.ok,true);
+  const sizes=DB.raw.prepare("SELECT size,stock,price_cents FROM variants WHERE product_id=? ORDER BY id").all(created.id).map(x=>[x.size,x.stock,x.price_cents]);
+  assert.deepEqual(sizes,[["S",2,900000],["M",2,900000]]);
+  DB.raw.prepare("UPDATE products SET images=?,photo_ids=?,photo_file_id=? WHERE id=?").run('["/products/a/front.webp"]','["file-one","file-two"]',"file-one",created.id);
+  const list=async()=>{
+    const request=new Request(workerUrl+"/api/catalog");
+    const body=await (await handleApi(request,env,new URL(request.url))).json();
+    return body.products.find(p=>p.id===created.id);
+  };
+  const before=await list();
+  assert.equal(before.images.length,3);
+  assert.equal(before.photo_ids,undefined,"Telegram file IDs stay private");
+  assert.match(before.images[1],/^\/media\/product\/\d+\/0\?v=/);
+  assert.equal((await call(env,"/api/admin/product/photo-remove","POST",{id:created.id,index:1},makeInitData(200))).status,403);
+  assert.equal((await call(env,"/api/admin/product/photo-remove","POST",{id:created.id,index:1},admin)).status,200);
+  assert.equal(DB.raw.prepare("SELECT photo_file_id FROM products WHERE id=?").get(created.id).photo_file_id,"file-two");
+  assert.equal((await list()).images.length,2);
+  assert.equal((await call(env,"/api/admin/product","POST",{id:created.id,name:"Куртка",categoryId:(await list()).category_id,active:false},admin)).status,200);
+  assert.equal(await list(),undefined,"a hidden item leaves the catalogue");
+});
+
+test("customers see only their own orders with status history",async()=>{
+  const DB=localDB();
+  const env={DB,BOT_TOKEN:TOKEN,ADMIN_IDS:"100",DEMO_MODE:"0",STORE_READY:"1",MANAGER_USERNAME:"seller_01"};
+  await call(env,"/api/orders","GET",null,makeInitData(201));
+  await call(env,"/api/orders","GET",null,makeInitData(202));
+  const owner=DB.raw.prepare("SELECT id FROM customers WHERE telegram_id=201").get().id;
+  const order=DB.raw.prepare("INSERT INTO orders(customer_id,kind,status,total_cents,contact_name,contact_phone,delivery_address) VALUES(?,'catalog','confirmed',500000,'А','@a','м')").run(owner).lastInsertRowid;
+  DB.raw.prepare("INSERT INTO status_history(order_id,new_status) VALUES(?,'new'),(?,'confirmed')").run(order,order);
+  const mine=await (await call(env,"/api/orders","GET",null,makeInitData(201))).json();
+  assert.equal(mine.orders.length,1);
+  assert.deepEqual(mine.orders[0].statuses.slice(-2),["new","confirmed"]);
+  assert.match(mine.orders[0].managerUrl,/seller_01/);
+  assert.equal((await (await call(env,"/api/orders","GET",null,makeInitData(202))).json()).orders.length,0);
 });

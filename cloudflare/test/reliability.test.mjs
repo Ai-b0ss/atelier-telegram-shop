@@ -41,7 +41,7 @@ function database(){
   raw.exec("PRAGMA foreign_keys=ON");
   for(const path of ["schema.sql","seed.sql","migrations/0001_order_status_triggers.sql",
                      "migrations/0002_miniapp.sql","migrations/0003_store_readiness.sql",
-                     "migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql"])
+                     "migrations/0004_shipped_return.sql","migrations/0006_product_gallery.sql","migrations/0007_reviews.sql","migrations/0009_uploaded_photos.sql"])
     raw.exec(readFileSync(new URL("../"+path,import.meta.url),"utf8"));
   return {raw,
     prepare(sql){

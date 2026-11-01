@@ -377,6 +377,7 @@ export function makeHandler(env) {
     if(data==="mine")return allMine(id,u);
     if(data==="custom")return startCustom(id);
     if(data==="reviews")return reviewsMessage(id);
+    if(data==="photodone"){await delSession(id);return send(id,"Готово, фото уже в витрине.")}
     if(data==="help")return send(id,HELP);
     if(data.startsWith("fill:")){
       const values={tg:u.username?"@"+u.username:"",name:u.first_name,consult:"нужна консультация",later:"согласовать с менеджером"};
@@ -387,9 +388,15 @@ export function makeHandler(env) {
     if(data==="checkout"){const c=await customer(u);const items=await rows(db,"SELECT variant_id FROM cart_items WHERE customer_id=?",c.id);if(!items.length)return send(id,"Корзина пуста.");await setSession(id,"checkout","name");return send(id,"Как к вам обращаться? /cancel — отмена",nameButtons(u))}
     const [action,value,...rest]=data.split(":");const n=safeInt(value);if(!n)return;
     if(action==="cat"){
-      const ps=await rows(db,"SELECT p.id,p.name,p.images,MIN(v.price_cents) AS price FROM products p JOIN variants v ON v.product_id=p.id AND v.active=1 AND v.stock>0 WHERE p.category_id=? AND p.active=1 GROUP BY p.id ORDER BY p.id",n);
+      const ps=await rows(db,"SELECT p.id,p.name,p.images,p.photo_file_id,MIN(v.price_cents) AS price FROM products p JOIN variants v ON v.product_id=p.id AND v.active=1 AND v.stock>0 WHERE p.category_id=? AND p.active=1 GROUP BY p.id ORDER BY p.id",n);
       if(!ps.length)return send(id,"Изделий пока нет.",kb([["Назад","cats"]]));
-      for(const x of ps)await sendWithPhoto(id,firstImage(x),x.name+"\n"+rub(x.price),kb([["Выбрать размер","p:"+x.id]]));
+      for(const x of ps){
+        const label=x.name+"\n"+rub(x.price),choose=kb([["Выбрать размер","p:"+x.id]]);
+        if(!firstImage(x)&&x.photo_file_id){
+          try{await api("sendPhoto",{chat_id:id,photo:x.photo_file_id,caption:label,reply_markup:choose});continue}catch{console.warn("Uploaded photo rejected")}
+        }
+        await sendWithPhoto(id,firstImage(x),label,choose);
+      }
       return send(id,"Другие категории:",kb([["Категории","cats"],["Главное меню","home"]]));
     }
     if(action==="p"){
@@ -397,7 +404,7 @@ export function makeHandler(env) {
       const vs=await rows(db,"SELECT * FROM variants WHERE product_id=? AND active=1 AND stock>0 ORDER BY size,color",n);
       const buttons=kb([...vs.map(v=>[v.size+" · "+v.color+" — "+rub(v.price_cents),"add:"+v.id]),...(p.size_chart?[["Таблица размеров","sz:"+p.id]]:[]),["Категории","cats"]]);
       const caption=p.name+"\n"+p.description+"\n\nНажмите на размер, и вещь добавится в корзину:";
-      if(p.photo_file_id&&!p.images){
+      if(p.photo_file_id&&!firstImage(p)){
         try{return await api("sendPhoto",{chat_id:id,photo:p.photo_file_id,caption,reply_markup:buttons})}catch{}
       }
       return sendWithPhoto(id,firstImage(p),caption,buttons);
@@ -450,7 +457,7 @@ export function makeHandler(env) {
     const product=await first(db,"SELECT id,name FROM products WHERE id=?",productId);
     if(!product)return send(id,"Изделие не найдено.");
     await setSession(id,"product_photo","await_photo",{productId});
-    return send(id,"Отправьте фотографию изделия «"+product.name+"». Она будет показана в каталоге. /cancel — отмена.");
+    return send(id,"Пришлите фото изделия «"+product.name+"», можно несколько, до 8. Первое станет обложкой. Убрать фото можно в панели, кнопка «Изменить».");
   }
   async function message(m){
     const u=m.from,id=m.chat?.id,txt=textLimit(m.text,3500);
@@ -464,9 +471,10 @@ export function makeHandler(env) {
         try{values=JSON.parse(current.payload)}catch{}
         const productId=safeInt(values.productId);
         if(!productId)return send(id,"Неверный идентификатор изделия. /cancel");
-        const updated=await run(db,"UPDATE products SET photo_file_id=? WHERE id=?",fileId,productId);
-        await delSession(id);
-        return send(id,updated.meta.changes===1?"Фотография изделия №"+productId+" обновлена.":"Изделие не найдено.");
+        // Albums arrive as parallel updates, so the append happens inside one statement.
+        const updated=await run(db,"UPDATE products SET photo_ids=json_insert(COALESCE(photo_ids,'[]'),'$[#]',?),photo_file_id=COALESCE(photo_file_id,?) WHERE id=? AND json_array_length(COALESCE(photo_ids,'[]'))<8",fileId,fileId,productId);
+        if(updated.meta.changes!==1)return send(id,"Фото не добавлено: лимит 8 штук или изделие не найдено.");
+        return send(id,"Фото добавлено. Пришлите ещё или нажмите «Готово».",kb([["Готово","photodone"]]));
       }
       if(!current||current.flow!=="custom")
         return send(id,"Для референсов начните оформление: /start → Индивидуальный пошив.");
@@ -567,15 +575,19 @@ export function makeHandler(env) {
   };
 }
 
-async function productImage(id,env){
+async function productImage(id,env,photoIndex=null){
   const db=env.DB;
   if(!db||!env.BOT_TOKEN||!id)return new Response("Not Found",{status:404});
-  const product=await db.prepare("SELECT photo_file_id FROM products WHERE id=? AND active=1").bind(id).first();
-  if(!product?.photo_file_id)return new Response("Not Found",{status:404});
+  const product=await db.prepare("SELECT photo_file_id,photo_ids FROM products WHERE id=? AND active=1").bind(id).first();
+  let fileId=product?.photo_file_id;
+  if(photoIndex!==null){
+    try{fileId=JSON.parse(product?.photo_ids||"[]")[photoIndex]}catch{fileId=null}
+  }
+  if(!fileId)return new Response("Not Found",{status:404});
   try{
     const infoResponse=await fetch("https://api.telegram.org/bot"+env.BOT_TOKEN+"/getFile",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({file_id:product.photo_file_id})
+      body:JSON.stringify({file_id:fileId})
     });
     if(!infoResponse.ok)return new Response("Image unavailable",{status:502});
     const meta=await infoResponse.json();
@@ -613,8 +625,8 @@ export default {
       );
     }
     if(request.method==="GET"&&url.pathname.startsWith("/media/product/")){
-      const id=safeInt(url.pathname.slice("/media/product/".length));
-      return productImage(id,env);
+      const [productPart,photoPart]=url.pathname.slice("/media/product/".length).split("/");
+      return productImage(safeInt(productPart),env,photoPart===undefined?null:Number(photoPart));
     }
     if(url.pathname.startsWith("/api/")){
       try{return await handleApi(request,env,url)}

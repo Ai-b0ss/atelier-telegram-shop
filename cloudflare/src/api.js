@@ -8,7 +8,15 @@ export function withGallery(row){
   let images=[];
   try{images=JSON.parse(row.images||"[]")}catch{}
   images=Array.isArray(images)?images.filter(x=>typeof x==="string"&&STATIC_PHOTO.test(x)).slice(0,8):[];
-  return {...row,images,size_chart:STATIC_PHOTO.test(row.size_chart||"")?row.size_chart:null};
+  let uploaded=[];
+  try{uploaded=JSON.parse(row.photo_ids||"[]")}catch{}
+  const owner=row.product_id??row.id;
+  if(Array.isArray(uploaded)&&owner)uploaded.slice(0,8).forEach((fileId,index)=>{
+    // The version makes a replaced photo at the same position bypass the phone's cache.
+    images.push("/media/product/"+Number(owner)+"/"+index+"?v="+String(fileId).slice(-10).replace(/[^a-zA-Z0-9_-]/g,""));
+  });
+  const {photo_ids,...visible}=row;
+  return {...visible,images,size_chart:STATIC_PHOTO.test(row.size_chart||"")?row.size_chart:null};
 }
 
 const json=(data,status=200)=>Response.json(data,{status,headers:{"cache-control":"no-store","x-content-type-options":"nosniff"}});
@@ -81,7 +89,7 @@ export async function handleApi(request,env,url){
   if(request.method==="GET"&&path==="/api/catalog"){
     const [categories,products,variants,ratings]=await Promise.all([
       rows(env.DB,"SELECT id,name FROM categories ORDER BY id"),
-      rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,p.images,p.size_chart,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY photo_available DESC,p.id LIMIT 150").then(list=>list.map(withGallery)),
+      rows(env.DB,"SELECT p.id,p.category_id,p.name,p.description,p.images,p.photo_ids,p.size_chart,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available FROM products p WHERE p.active=1 ORDER BY photo_available DESC,p.id LIMIT 150").then(list=>list.map(withGallery)),
       rows(env.DB,"SELECT v.id,v.product_id,v.size,v.color,v.price_cents,v.stock FROM variants v JOIN products p ON p.id=v.product_id WHERE v.active=1 AND p.active=1 ORDER BY v.id LIMIT 600"),
       rows(env.DB,"SELECT product_id,ROUND(AVG(rating),1) AS rating,COUNT(*) AS reviews FROM reviews WHERE hidden=0 GROUP BY product_id")
     ]);
@@ -110,7 +118,7 @@ export async function handleApi(request,env,url){
 
   if(request.method==="GET"&&path==="/api/cart"){
     const c=await getCustomer(env.DB,u);
-    const items=(await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.id AS product_id,p.name,p.images,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id)).map(withGallery);
+    const items=(await rows(env.DB,"SELECT ci.variant_id,ci.quantity,v.price_cents,v.stock,v.size,v.color,p.id AS product_id,p.name,p.images,p.photo_ids,CASE WHEN p.images IS NOT NULL OR (p.photo_file_id IS NOT NULL AND p.photo_file_id<>'') THEN 1 ELSE 0 END AS photo_available,CASE WHEN v.active=1 AND p.active=1 AND ci.quantity<=v.stock THEN 1 ELSE 0 END AS available FROM cart_items ci JOIN variants v ON v.id=ci.variant_id JOIN products p ON p.id=v.product_id WHERE ci.customer_id=? ORDER BY ci.variant_id",c.id)).map(withGallery);
     return json({ok:true,items,total_cents:items.reduce((n,x)=>n+x.quantity*x.price_cents,0)});
   }
   if(request.method==="POST"&&path==="/api/cart"){
@@ -211,6 +219,19 @@ export async function handleApi(request,env,url){
     try{await deliverOutbox(env,{orderId})}catch{}
     return json({ok:true,orderId,managerUrl:managerUrl(env,orderDraft(orderId,items,total))});
   }
+  if(request.method==="GET"&&path==="/api/orders"){
+    const c=await getCustomer(env.DB,u);
+    const orders=await rows(env.DB,"SELECT id,kind,status,total_cents,custom_details,created_at FROM orders WHERE customer_id=? ORDER BY id DESC LIMIT 20",c.id);
+    const [items,history]=orders.length?await Promise.all([
+      rows(env.DB,"SELECT i.order_id,i.product_name AS name,i.size,i.color,i.quantity FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.customer_id=? ORDER BY i.id",c.id),
+      rows(env.DB,"SELECT h.order_id,h.new_status FROM status_history h JOIN orders o ON o.id=h.order_id WHERE o.customer_id=? ORDER BY h.id",c.id)
+    ]):[[],[]];
+    return json({ok:true,orders:orders.map(o=>{
+      const lines=items.filter(x=>x.order_id===o.id);
+      return {...o,items:lines,statuses:history.filter(x=>x.order_id===o.id).map(x=>x.new_status),
+        managerUrl:managerUrl(env,o.kind==="custom"?customDraft(o.id):orderDraft(o.id,lines,o.total_cents))};
+    })});
+  }
   if(request.method==="POST"&&path==="/api/reviews"){
     const b=await safeBody(request),productId=Number(b.productId),rating=Number(b.rating),body=text(b.text,1000);
     if(!Number.isSafeInteger(productId)||productId<1||!Number.isInteger(rating)||rating<1||rating>5)return err("Поставьте оценку от 1 до 5");
@@ -277,7 +298,8 @@ export async function handleApi(request,env,url){
     return json({ok:true,orderId,managerUrl:managerUrl(env,customDraft(orderId))});
   }
   if(request.method==="GET"&&path==="/api/admin/dashboard"){
-    const products=await rows(env.DB,"SELECT p.id,p.name,p.description,p.category_id,p.active,p.photo_file_id,c.name AS category_name FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id LIMIT 200");
+    const products=await rows(env.DB,"SELECT p.id,p.name,p.description,p.category_id,p.active,p.photo_file_id,p.images,p.photo_ids,p.size_chart,c.name AS category_name FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id LIMIT 200").then(list=>list.map(withGallery));
+    const sizeCharts=(await rows(env.DB,"SELECT DISTINCT size_chart FROM products WHERE size_chart IS NOT NULL")).map(x=>x.size_chart);
     const variants=await rows(env.DB,"SELECT v.id,v.product_id,v.sku,v.size,v.color,v.price_cents,v.cost_cents,v.stock,v.active FROM variants v ORDER BY v.id LIMIT 600");
     const categories=await rows(env.DB,"SELECT id,name FROM categories ORDER BY id");
     const settings=await first(env.DB,"SELECT * FROM store_settings WHERE id=1");
@@ -307,7 +329,7 @@ export async function handleApi(request,env,url){
       ordersByStatus:Object.fromEntries(statuses.map(status=>
         [status,Number(counts.find(x=>x.status===status)?.n||0)]))
     };
-    return json({ok:true,metrics,orders,products,variants,categories,settings,demo:demoMode(env)});
+    return json({ok:true,metrics,orders,products,variants,categories,sizeCharts,settings,demo:demoMode(env)});
   }
   if(request.method==="POST"&&path==="/api/admin/settings"){
     const b=await safeBody(request);
@@ -323,24 +345,52 @@ export async function handleApi(request,env,url){
   }
   if(request.method==="POST"&&path==="/api/admin/product"){
     const b=await safeBody(request);
-    const categoryId=integer(b.categoryId),name=text(b.name,100),description=text(b.description,1000);
-    if(!categoryId||name.length<2)return err("Product name and category required");
+    const name=text(b.name,100),description=text(b.description,1000),newCategory=text(b.newCategory,60);
+    let categoryId=integer(b.categoryId);
+    if(newCategory.length>=2){
+      await run(env.DB,"INSERT OR IGNORE INTO categories(name) VALUES(?)",newCategory);
+      categoryId=(await first(env.DB,"SELECT id FROM categories WHERE name=?",newCategory))?.id;
+    }
+    if(!categoryId||name.length<2)return err("Укажите название и категорию");
+    const sizeChart=STATIC_PHOTO.test(b.sizeChart||"")?b.sizeChart:null;
     const category=await first(env.DB,"SELECT id FROM categories WHERE id=?",categoryId);
     if(!category)return err("Unknown category",404);
     let itemId=integer(b.id);
     if(itemId){
-      const changed=await run(env.DB,"UPDATE products SET name=?,description=?,category_id=?,active=? WHERE id=?",name,description,categoryId,b.active===false?0:1,itemId);
+      const changed=await run(env.DB,"UPDATE products SET name=?,description=?,category_id=?,active=?,size_chart=? WHERE id=?",name,description,categoryId,b.active===false?0:1,sizeChart,itemId);
       if(changed.meta.changes!==1)return err("Product not found",404);
     }else{
-      const ins=await run(env.DB,"INSERT INTO products(category_id,name,description,active) VALUES(?,?,?,?)",categoryId,name,description,b.active===false?0:1);
+      const ins=await run(env.DB,"INSERT INTO products(category_id,name,description,active,size_chart) VALUES(?,?,?,?,?)",categoryId,name,description,b.active===false?0:1,sizeChart);
       itemId=ins.meta.last_row_id;
+      // One form creates every size, so a new item is on sale without entering article numbers.
+      const sizes=[...new Set(text(b.sizes,200).split(",").map(x=>x.trim().slice(0,50)).filter(Boolean))].slice(0,12);
+      const price=money(b.priceCents),cost=money(b.costCents??0),stock=integer(b.stock,0,100000),color=text(b.color,80);
+      if(sizes.length&&price!==null&&cost!==null&&stock!==null&&color){
+        await env.DB.batch(sizes.map((size,index)=>env.DB.prepare("INSERT INTO variants(product_id,sku,size,color,price_cents,cost_cents,stock,active) VALUES(?,?,?,?,?,?,?,1)")
+          .bind(itemId,"P"+itemId+"-"+(index+1),size,color,price,cost,stock)));
+      }
     }
     return json({ok:true,id:itemId});
+  }
+  if(request.method==="POST"&&path==="/api/admin/product/photo-remove"){
+    const b=await safeBody(request),id=integer(b.id),index=integer(b.index,0,20);
+    if(!id||index===null)return err("Unknown photo");
+    const product=await first(env.DB,"SELECT images,photo_ids FROM products WHERE id=?",id);
+    if(!product)return err("Product not found",404);
+    let fixed=[],uploaded=[];
+    try{fixed=JSON.parse(product.images||"[]")}catch{}
+    try{uploaded=JSON.parse(product.photo_ids||"[]")}catch{}
+    if(index<fixed.length)fixed.splice(index,1);
+    else if(index-fixed.length<uploaded.length)uploaded.splice(index-fixed.length,1);
+    else return err("Unknown photo",404);
+    await run(env.DB,"UPDATE products SET images=?,photo_ids=?,photo_file_id=? WHERE id=?",
+      fixed.length?JSON.stringify(fixed):null,uploaded.length?JSON.stringify(uploaded):null,uploaded[0]||null,id);
+    return json({ok:true});
   }
   if(request.method==="POST"&&path==="/api/admin/variant"){
     const b=await safeBody(request),id=integer(b.id),productId=integer(b.productId),
       price=money(b.priceCents),cost=money(b.costCents),stock=integer(b.stock,0,100000),
-      sku=text(b.sku,64),size=text(b.size,50),color=text(b.color,80);
+      sku=text(b.sku,64)||"P"+productId+"-"+Date.now().toString(36),size=text(b.size,50),color=text(b.color,80);
     if(!productId||price===null||cost===null||stock===null||sku.length<2||size.length<1||color.length<1)return err("Invalid variant");
     if(!/^[a-zA-Z0-9_-]{2,64}$/.test(sku))return err("Invalid SKU");
     const product=await first(env.DB,"SELECT id FROM products WHERE id=?",productId);

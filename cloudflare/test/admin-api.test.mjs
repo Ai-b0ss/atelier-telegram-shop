@@ -315,3 +315,34 @@ test("checkout rejects a cart changed between snapshot and atomic commit",async(
     assert.equal(raw.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
   }finally{globalThis.fetch=originalFetch;raw.close()}
 });
+
+
+test("concurrent add-to-cart requests must not overwrite each other",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  const originalPrepare=storage.prepare.bind(storage);
+  let arrivals=0;let release;
+  const gate=new Promise(resolve=>{release=resolve});
+  storage.prepare=sql=>{
+    const stmt=originalPrepare(sql);
+    if(sql.startsWith("SELECT quantity FROM cart_items WHERE customer_id")){
+      const originalFirst=stmt.first.bind(stmt);
+      stmt.first=async()=>{
+        const read=await originalFirst();
+        if(++arrivals===2)release();
+        await gate;  // Both requests observe the same original cart before either writes.
+        return read;
+      };
+    }
+    return stmt;
+  };
+  try{
+    const responses=await Promise.all([
+      call(env,"/api/cart","POST",{variantId:1,delta:1}),
+      call(env,"/api/cart","POST",{variantId:1,delta:1})
+    ]);
+    assert.deepEqual(responses.map(r=>r.status),[200,200]);
+    assert.equal(db.prepare("SELECT quantity FROM cart_items WHERE variant_id=1").get().quantity,2,
+      "two accepted increments must result in quantity two, not one");
+  }finally{db.close()}
+});

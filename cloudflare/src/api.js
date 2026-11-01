@@ -162,20 +162,33 @@ export async function handleApi(request,env,url){
     const previous=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
     if(previous)return json({ok:true,orderId:previous.order_id,duplicate:true});
     const c=await getCustomer(env.DB,u);
-    const ins=await run(env.DB,"INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) VALUES(?,'custom','new',?,?,?,?,?)",
-      c.id,name,phone,address,description,measurements);
+    let orderId;
     try{
-      await run(env.DB,"INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,?)",u.id,requestKey,ins.meta.last_row_id);
+      const results=await env.DB.batch([
+        dbStatement(env.DB,
+          "INSERT INTO orders(customer_id,kind,status,contact_name,contact_phone,delivery_address,custom_details,custom_measurements) "+
+          "VALUES(?,'custom','new',?,?,?,?,?)",
+          c.id,name,phone,address,description,measurements),
+        dbStatement(env.DB,
+          "INSERT INTO checkout_requests(telegram_id,request_key,order_id) VALUES(?,?,last_insert_rowid())",
+          u.id,requestKey)
+      ]);
+      orderId=Number(results[0]?.meta?.last_row_id||0);
+      if(!orderId){
+        const committed=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
+        orderId=committed?.order_id;
+      }
     }catch{
-      await run(env.DB,"UPDATE orders SET status='canceled' WHERE id=? AND status='new'",ins.meta.last_row_id);
+      // No orphan or personal data remains after a failed D1 transaction.
       const existing=await first(env.DB,"SELECT order_id FROM checkout_requests WHERE telegram_id=? AND request_key=?",u.id,requestKey);
       if(existing)return json({ok:true,orderId:existing.order_id,duplicate:true});
       return err("Request could not be saved; retry",409);
     }
+    if(!orderId)return err("Request saved but confirmation unavailable; contact support.",503);
     for(const adminId of String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(Number.isSafeInteger)){
-      try{await telegramSend(env,adminId,"Новая тестовая заявка на индивидуальный пошив №"+ins.meta.last_row_id+" из Mini App.");}catch{}
+      try{await telegramSend(env,adminId,"Новая тестовая заявка на индивидуальный пошив №"+orderId+" из Mini App.");}catch{}
     }
-    return json({ok:true,orderId:ins.meta.last_row_id});
+    return json({ok:true,orderId});
   }
   if(request.method==="GET"&&path==="/api/admin/dashboard"){
     const products=await rows(env.DB,"SELECT p.id,p.name,p.description,p.category_id,p.active,p.photo_file_id,c.name AS category_name FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id LIMIT 200");

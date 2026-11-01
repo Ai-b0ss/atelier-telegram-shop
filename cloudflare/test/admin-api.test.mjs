@@ -222,3 +222,26 @@ test("dashboard aggregates include history beyond recent list limits",async()=>{
     assert.equal(d.metrics.lowStockCount,605,"low stock count must include undisplayed variants");
   }finally{db.close()}
 });
+
+
+test("cart can discard an archived variant but cannot add it again",async()=>{
+  const storage=localDB(),db=storage.raw;
+  const env={DB:storage,BOT_TOKEN:TOKEN,ADMIN_IDS:"777",DEMO_MODE:"1"};
+  try{
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,200);
+    db.exec("UPDATE variants SET active=0 WHERE id=1");
+    let cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items.length,1,"archived variants remain visible until removed");
+    let removed=await call(env,"/api/cart","POST",{variantId:1,delta:-1});
+    assert.equal(removed.status,200,"a user must be able to remove an archived variant");
+    assert.equal((await removed.json()).quantity,1);
+    removed=await call(env,"/api/cart","POST",{variantId:1,delta:-1});
+    assert.equal(removed.status,200);
+    assert.equal((await removed.json()).quantity,0);
+    cart=await (await call(env,"/api/cart")).json();
+    assert.equal(cart.items.length,0);
+    assert.equal((await call(env,"/api/cart","POST",{variantId:1,delta:1})).status,404,
+      "an archived variant must never be purchasable again");
+  }finally{db.close()}
+});

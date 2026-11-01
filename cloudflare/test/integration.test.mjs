@@ -138,14 +138,14 @@ test('race: order must not consume some inventory when another item sells out',a
     assert.equal((await call(makeUpdate(seq++,{text:"@buyer"}))).status,200);
     assert.equal((await call(makeUpdate(seq++,{text:"Самовывоз"}))).status,200);
     assert(competitorRaced,"race was not injected");
-    const order=c.prepare("SELECT status FROM orders ORDER BY id DESC LIMIT 1").get();
-    assert.equal(order.status,"canceled");
+    assert.equal(c.prepare("SELECT COUNT(*) AS n FROM orders").get().n,0,
+      "failed inventory batch must not persist a phantom order with contact data");
     assert.equal(c.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5,
       "available item must not be deducted when second item fails");
     assert.equal(c.prepare("SELECT stock FROM variants WHERE id=2").get().stock,0);
     assert.equal(c.prepare("SELECT COUNT(*) n FROM order_items").get().n,0);
     assert.equal(c.prepare("SELECT COUNT(*) n FROM cart_items").get().n,2);
-    assert(deliveries.some(e=>e.method==="sendMessage"&&e.data.text?.includes("Склад изменился")));
+    assert(deliveries.some(e=>e.method==="sendMessage"&&e.data.text?.includes("Заказ не оформлен")));
   }finally{globalThis.fetch=prior;storage.raw.close()}
 });
 
@@ -521,7 +521,7 @@ test("Telegram checkout preserves cart additions made before its stock transacti
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM cart_items").get().n,2);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM order_items").get().n,0);
     assert.equal(db.prepare("SELECT stock FROM variants WHERE id=1").get().stock,5);
-    assert(sent.some(x=>x.body?.text?.includes("Склад изменился")),
+    assert(sent.some(x=>x.body?.text?.includes("Заказ не оформлен")),
       "buyer must be warned of an interrupted checkout");
   }finally{globalThis.fetch=originalFetch;db.close()}
 });

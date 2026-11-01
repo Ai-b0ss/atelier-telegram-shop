@@ -31,8 +31,8 @@ const COMMANDS=[
   ["custom","Заказать пошив"],["reviews","Отзывы покупателей"],["help","Что умеет бот"],["privacy","Данные и условия"],["cancel","Отменить ввод"]
 ];
 const HELP="Что можно сделать:\n\n/catalog — посмотреть вещи с фото и выбрать размер\n/cart — корзина и оформление заказа\n/custom — заказать пошив по своей идее\n/orders — ваши заказы\n/reviews — отзывы покупателей\n/privacy — данные и условия\n/cancel — отменить ввод\n\nОплату и встречу у метро Беляево вы согласуете с менеджером в Telegram: @onlyrazor.";
-const MENU={"🛍 Каталог":"catalog","🧺 Корзина":"cart","✂️ Пошив":"custom","📦 Мои заказы":"orders","⭐ Отзывы":"reviews","❓ Помощь":"help"};
-const MENU_KEYBOARD={keyboard:[["🛍 Каталог","🧺 Корзина"],["✂️ Пошив","📦 Мои заказы"],["⭐ Отзывы","❓ Помощь"]].map(row=>row.map(text=>({text}))),
+const MENU={"🛍 Каталог":"catalog","🧺 Корзина":"cart","✂️ Пошив":"custom","📦 Мои заказы":"orders","⭐ Отзывы":"reviews","💬 Менеджер":"manager","❓ Помощь":"help"};
+const MENU_KEYBOARD={keyboard:[["🛍 Каталог","🧺 Корзина"],["✂️ Пошив","📦 Мои заказы"],["⭐ Отзывы","💬 Менеджер"],["❓ Помощь"]].map(row=>row.map(text=>({text}))),
   resize_keyboard:true,is_persistent:true,input_field_placeholder:"Выберите раздел внизу"};
 const chatPhoto=path=>SHOP+String(path).replace(/\.webp$/,".jpg");
 const firstImage=p=>{try{return JSON.parse(p.images||"[]")[0]||null}catch{return null}};
@@ -415,6 +415,19 @@ export function makeHandler(env) {
       await run(db,"INSERT INTO cart_items(customer_id,variant_id,quantity) VALUES(?,?,1) ON CONFLICT(customer_id,variant_id) DO UPDATE SET quantity=quantity+1",c.id,n);
       return send(id,"Изделие добавлено.",kb([["Открыть корзину","cart"],["Продолжить покупки","cats"]]));
     }
+    if(action==="st"||action==="stc"){
+      if(!admins.has(id))return send(id,"Доступ запрещён.");
+      const order=await first(db,"SELECT * FROM orders WHERE id=?",n);
+      if(!order)return send(id,"Заказ не найден.");
+      if(action==="stc")return send(id,"Точно отменить заказ №"+n+"? Покупатель получит уведомление.",kb([["Да, отменить","st:"+n+":canceled"]]));
+      const status=String(rest[0]||"");
+      await setStatus(id,order,status);
+      const updated=await first(db,"SELECT status FROM orders WHERE id=?",n);
+      if(updated?.status!==status)return;
+      const following=(nextStatuses[status]||[]).filter(x=>x!=="canceled");
+      if(following.length)return send(id,"Следующий шаг по заказу №"+n+":",kb(following.map(x=>[ru[x],"st:"+n+":"+x])));
+      return;
+    }
     if(action==="rm"){
       const c=await customer(u);await run(db,"DELETE FROM cart_items WHERE customer_id=? AND variant_id=?",c.id,n);
       return cart(id,u);
@@ -476,6 +489,7 @@ export function makeHandler(env) {
       if(pressed==="custom")return startCustom(id);
       if(pressed==="orders")return allMine(id,u);
       if(pressed==="reviews")return reviewsMessage(id);
+      if(pressed==="manager")return send(id,"Вопрос по вещи, размеру или встрече? Напишите менеджеру:",{inline_keyboard:[[{text:"Написать менеджеру",url:"https://t.me/"+String(env.MANAGER_USERNAME||"onlyrazor").replace(/^@/,"")}]]});
       return send(id,HELP);
     }
     const cmd=txt.split(/\s+/)[0].split("@")[0].toLowerCase();

@@ -14,8 +14,8 @@ const wrap=stmt=>({...bound(stmt),bind:(...v)=>bound(stmt,v)});
 function makeEnv(){
   const db=new DatabaseSync(":memory:");
   db.exec(readFileSync(new URL("../migrations/0005_notification_outbox.sql",import.meta.url),"utf8"));
-  db.exec("CREATE TABLE orders(id INTEGER PRIMARY KEY,kind TEXT,total_cents INTEGER);CREATE TABLE order_items(id INTEGER PRIMARY KEY,order_id INTEGER,product_name TEXT,size TEXT,color TEXT,quantity INTEGER);");
-  db.exec("INSERT INTO orders VALUES(7,'catalog',500000);INSERT INTO order_items VALUES(1,7,'Жакет','M','чёрный',1);");
+  db.exec("CREATE TABLE orders(id INTEGER PRIMARY KEY,kind TEXT,total_cents INTEGER,contact_name TEXT,contact_phone TEXT,delivery_address TEXT,custom_details TEXT,custom_measurements TEXT);CREATE TABLE order_items(id INTEGER PRIMARY KEY,order_id INTEGER,product_name TEXT,size TEXT,color TEXT,quantity INTEGER);");
+  db.exec("INSERT INTO orders(id,kind,total_cents) VALUES(7,'catalog',500000);INSERT INTO order_items VALUES(1,7,'Жакет','M','чёрный',1);");
   const DB={prepare:sql=>wrap(db.prepare(sql))};
   return {db,env:{DB,BOT_TOKEN:"t",ADMIN_IDS:"100,200",DEMO_MODE:"0",STORE_READY:"1",MANAGER_USERNAME:"seller_01"}};
 }
@@ -58,6 +58,19 @@ test("a Bot API outage loses nothing: the message is retried and sent once",asyn
   assert.match(button.url,/^https:\/\/t\.me\/seller_01\?text=/);
   assert.match(decodeURIComponent(button.url),/Жакет, M, чёрный × 1/);
   assert.deepEqual(await outboxHealth(env.DB),{pending:0,failed:0});
+});
+
+test("the seller's notification carries the order, the buyer's contact and action buttons",async()=>{
+  const {db,env}=makeEnv();
+  db.exec("UPDATE orders SET contact_name='Анна',contact_phone='@anna',delivery_address='18 ноября, 15:00' WHERE id=7");
+  await queue(env);
+  const bodies=[];
+  await withFetch(async(_,init)=>{bodies.push(JSON.parse(init.body));return new Response("{}")},async()=>{await deliverOutbox(env)});
+  const seller=bodies.find(x=>x.chat_id===200);
+  assert.match(seller.text,/Жакет, M, чёрный × 1/);
+  assert.match(seller.text,/@anna/);
+  assert.match(seller.text,/18 ноября, 15:00/);
+  assert.deepEqual(seller.reply_markup.inline_keyboard.flat().map(x=>x.callback_data),["st:7:confirmed","stc:7"]);
 });
 
 test("network errors are retried, permanent refusals and exhausted rows stop",async()=>{

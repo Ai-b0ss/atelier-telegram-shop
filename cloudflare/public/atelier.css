@@ -116,6 +116,12 @@ body.is-inner-view .section-heading{margin-top:12px}
 .review small{color:var(--muted);font-size:12px}
 .review .quiet{display:block;margin-top:4px;font-size:12px}
 .sheet-body .review-note{font-size:14px;margin:8px 0 12px}
+.review-product{all:unset;cursor:pointer;display:inline-block;margin-top:4px;font-size:13px;color:var(--muted);text-decoration:underline;text-underline-offset:2px;min-height:24px}
+.review p{margin:6px 0 4px;font-size:14px;line-height:1.5}
+.review-new{font-size:18px;font-weight:600;letter-spacing:-.02em;margin:22px 0 0}
+.review-pick{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--muted)}
+.review-pick select{font:inherit;font-size:16px;color:var(--ink);min-height:50px;border:1px solid var(--line);border-radius:12px;padding:0 12px;background:transparent}
+.review-note{font-size:14px;color:var(--muted)}
 .review-form{margin-top:14px;display:grid;gap:10px}
 .review-form textarea{width:100%;box-sizing:border-box;font:inherit;font-size:16px;border:1px solid var(--line);border-radius:12px;padding:12px;background:transparent;resize:vertical}
 .star-pick{display:flex;gap:2px}

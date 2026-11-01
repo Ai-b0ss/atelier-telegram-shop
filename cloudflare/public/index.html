@@ -58,6 +58,10 @@
  </form></div>
 </section>
 <section id="view-done" class="view"><div class="card done" id="done-body"></div></section>
+<section id="view-reviews" class="view">
+ <div class="section-heading"><div><h2>Отзывы</h2></div><span id="reviews-count" class="section-count"></span></div>
+ <div id="reviews-page"><p class="review-note">Загружаем отзывы…</p></div>
+</section>
 <section id="view-admin" class="view">
  <div class="section-heading"><div><h2>Панель ателье</h2></div><button class="quiet" id="refresh-admin">Обновить ↻</button></div>
  <div id="admin-gate" class="card padded">Проверка доступа через Telegram…</div>
@@ -77,6 +81,7 @@
  <button data-view="catalog" class="selected" aria-pressed="true"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>Каталог</button>
  <button data-view="cart" aria-pressed="false"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 8h14l-1 13H6L5 8Z"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/></svg></span>Корзина</button>
  <button data-view="tailor" aria-pressed="false"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="m9 9 12 12M9 15 21 3"/></svg></span>Пошив</button>
+ <button data-view="reviews" aria-pressed="false"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.1 5.9-.8z"/></svg></span>Отзывы</button>
  <button data-view="admin" id="admin-nav" aria-pressed="false" hidden><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="currentColor" stroke="none"/><circle cx="16" cy="17" r="2" fill="currentColor" stroke="none"/></svg></span>Управление</button>
 </nav>
 <footer><div>АТЕЛЬЕ</div><div><a href="/privacy" class="footer-link">Условия и данные</a></div></footer>

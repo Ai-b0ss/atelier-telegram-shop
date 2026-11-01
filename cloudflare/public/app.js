@@ -54,6 +54,7 @@ function go(view){
     e.setAttribute("aria-pressed",String(active));
   });
   if(view==="cart")safeRun(loadCart);
+  if(view==="reviews")safeRun(loadAllReviews);
   if(view==="admin"&&state.me?.admin)safeRun(loadAdmin);
   window.scrollTo({top:0,behavior:"smooth"});
 }
@@ -106,9 +107,21 @@ const reviewDate=value=>{const d=new Date(String(value).replace(" ","T")+"Z");re
 function reviewsHtml(p){
   const list=state.reviews[p.id];
   const items=!list?'<p class="review-note">Загружаем отзывы…</p>':list.length?list.map(r=>'<article class="review"><div class="review-top"><b>'+esc(r.author_name)+'</b><span class="review-stars" aria-label="Оценка '+Number(r.rating)+' из 5">'+stars(Number(r.rating))+'</span></div><p>'+esc(r.body)+'</p><small>'+esc(reviewDate(r.updated_at))+'</small>'+(state.me?.admin?'<button type="button" class="quiet" data-hide-review="'+Number(r.id)+'" data-product="'+p.id+'">Скрыть</button>':'')+'</article>').join(""):'<p class="review-note">Отзывов пока нет. Ваш может быть первым.</p>';
-  const draft=state.reviewDraft;
-  const form=canUse()?'<form class="review-form" data-product="'+p.id+'"><div class="star-pick" role="radiogroup" aria-label="Оценка">'+[1,2,3,4,5].map(n=>'<button type="button" role="radio" aria-checked="'+(draft.rating===n)+'" aria-label="'+n+' из 5" data-star="'+n+'" class="'+(draft.rating>=n?"on":"")+'">★</button>').join("")+'</div><textarea name="text" maxlength="1000" rows="3" placeholder="Как сидит, что понравилось…">'+esc(draft.text)+'</textarea><button type="submit" class="primary">Оставить отзыв</button></form>':'<p class="review-note">Оставить отзыв можно в Telegram.</p>';
+  const form=canUse()?reviewForm(p.id):'<p class="review-note">Оставить отзыв можно в Telegram.</p>';
   return '<section class="reviews"><h4>Отзывы'+(p.reviews?' <span>'+esc(String(p.rating).replace(".",","))+' ★ · '+Number(p.reviews)+'</span>':'')+'</h4>'+items+form+'</section>';
+}
+function reviewForm(product,picker=""){
+  const draft=state.reviewDraft;
+  return '<form class="review-form"'+(product?' data-product="'+product+'"':'')+'>'+picker+'<div class="star-pick" role="radiogroup" aria-label="Оценка">'+[1,2,3,4,5].map(n=>'<button type="button" role="radio" aria-checked="'+(draft.rating===n)+'" aria-label="'+n+' из 5" data-star="'+n+'" class="'+(draft.rating>=n?"on":"")+'">★</button>').join("")+'</div><textarea name="text" maxlength="1000" rows="3" placeholder="Как сидит, что понравилось…">'+esc(draft.text)+'</textarea><button type="submit" class="primary">Оставить отзыв</button></form>';
+}
+async function loadAllReviews(){
+  const result=await api("/api/reviews");
+  $("reviews-count").textContent=result.reviews.length?String(result.reviews.length):"";
+  const products=state.catalog?.products||[];
+  const picker='<label class="review-pick">Какую вещь оцениваете<select name="product">'+products.map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join("")+'</select></label>';
+  $("reviews-page").innerHTML=
+    (result.reviews.length?result.reviews.map(r=>'<article class="review"><div class="review-top"><b>'+esc(r.author_name)+'</b><span class="review-stars" aria-label="Оценка '+Number(r.rating)+' из 5">'+stars(Number(r.rating))+'</span></div><button type="button" class="review-product" data-open="'+Number(r.product_id)+'">'+esc(r.product_name)+'</button><p>'+esc(r.body)+'</p><small>'+esc(reviewDate(r.updated_at))+'</small>'+(state.me?.admin?'<button type="button" class="quiet" data-hide-review="'+Number(r.id)+'" data-product="'+Number(r.product_id)+'">Скрыть</button>':'')+'</article>').join(""):'<p class="review-note">Отзывов пока нет. Ваш может быть первым.</p>')+
+    (canUse()&&products.length?'<h4 class="review-new">Оставить отзыв</h4>'+reviewForm(0,picker):canUse()?'':'<p class="review-note">Оставить отзыв можно в Telegram.</p>');
 }
 async function loadReviews(productId){
   const result=await api("/api/reviews?product="+productId);
@@ -202,9 +215,16 @@ async function loadMe(){
     $("admin-gate").textContent="Откройте магазин из Telegram, чтобы войти в защищённую панель.";
     return;
   }
-  const result=await safeRun(()=>api("/api/me"));
-  if(!result){renderProducts();return;}
+  const result=await api("/api/me").catch(()=>null);
+  if(!result){
+    toast("Не удалось войти. Закройте витрину и откройте её заново",true);
+    renderProducts();
+    return;
+  }
   state.me=result;
+  // Spare customers from retyping the contact Telegram already knows.
+  if(result.user?.username)document.querySelectorAll('input[name="phone"]').forEach(input=>{if(!input.value)input.value="@"+result.user.username});
+  if(result.user?.name)document.querySelectorAll('#checkout-form input[name="name"],#tailor-form input[name="name"]').forEach(input=>{if(!input.value)input.value=result.user.name});
   if(result.admin){
     $("admin-nav").hidden=false;
     $("admin-gate").hidden=true;
@@ -409,51 +429,66 @@ async function init(){
     if(slide){haptic();openSheet(Number(slide.dataset.open))}
   });
   const sheet=$("product-sheet");
-  sheet.addEventListener("input",e=>{if(e.target.matches(".review-form textarea"))state.reviewDraft.text=e.target.value});
-  sheet.addEventListener("submit",e=>{
-    const form=e.target.closest(".review-form");
-    if(!form)return;
-    e.preventDefault();
-    const submit=form.querySelector('[type="submit"]'),productId=Number(form.dataset.product);
-    submit.disabled=true;
-    safeRun(async()=>{
-      await api("/api/reviews","POST",{productId,rating:state.reviewDraft.rating,text:state.reviewDraft.text});
-      state.reviewDraft={rating:0,text:""};
-      haptic("success");
-      toast("Спасибо за отзыв");
-      await loadCatalog();
-      await loadReviews(productId);
-    }).finally(()=>{submit.disabled=false});
+  [sheet,$("view-reviews")].forEach(root=>{
+    root.addEventListener("input",e=>{if(e.target.matches(".review-form textarea"))state.reviewDraft.text=e.target.value});
+    root.addEventListener("click",e=>{
+      const star=e.target.closest("[data-star]");
+      if(star){
+        haptic();
+        state.reviewDraft.rating=Number(star.dataset.star);
+        star.parentElement.querySelectorAll("[data-star]").forEach(el=>{
+          const n=Number(el.dataset.star);
+          el.classList.toggle("on",n<=state.reviewDraft.rating);
+          el.setAttribute("aria-checked",String(n===state.reviewDraft.rating));
+        });
+        return;
+      }
+      const hide=e.target.closest("[data-hide-review]");
+      if(hide){
+        const productId=Number(hide.dataset.product);
+        safeRun(async()=>{
+          await api("/api/admin/review/hide","POST",{id:Number(hide.dataset.hideReview)});
+          await loadCatalog();
+          await loadReviews(productId);
+          if(state.view==="reviews")await loadAllReviews();
+        });
+        return;
+      }
+      const open=e.target.closest(".review-product[data-open]");
+      if(open){haptic();openSheet(Number(open.dataset.open))}
+    });
+    root.addEventListener("submit",e=>{
+      const form=e.target.closest(".review-form");
+      if(!form)return;
+      e.preventDefault();
+      const submit=form.querySelector('[type="submit"]');
+      const productId=Number(form.dataset.product||form.elements.product?.value);
+      if(!state.reviewDraft.rating){toast("Поставьте оценку",true);return}
+      submit.disabled=true;
+      safeRun(async()=>{
+        await api("/api/reviews","POST",{productId,rating:state.reviewDraft.rating,text:state.reviewDraft.text});
+        state.reviewDraft={rating:0,text:""};
+        haptic("success");
+        toast("Спасибо за отзыв");
+        await loadCatalog();
+        await loadReviews(productId);
+        if(state.view==="reviews")await loadAllReviews();
+      }).finally(()=>{submit.disabled=false});
+    });
   });
   sheet.addEventListener("cancel",e=>{e.preventDefault();closeSheet()});
   sheet.addEventListener("click",e=>{
     if(e.target===sheet||e.target.closest("[data-sheet-close]")){closeSheet();return}
     const select=e.target.closest("[data-choice]");
     if(select){haptic();state.selected[Number(select.dataset.product)]=Number(select.dataset.choice);openSheet(Number(select.dataset.product));return}
-    const star=e.target.closest("[data-star]");
-    if(star){
-      haptic();
-      state.reviewDraft.rating=Number(star.dataset.star);
-      star.parentElement.querySelectorAll("[data-star]").forEach(el=>{
-        const n=Number(el.dataset.star);
-        el.classList.toggle("on",n<=state.reviewDraft.rating);
-        el.setAttribute("aria-checked",String(n===state.reviewDraft.rating));
-      });
-      return;
-    }
-    const hide=e.target.closest("[data-hide-review]");
-    if(hide){
-      const productId=Number(hide.dataset.product);
-      safeRun(async()=>{
-        await api("/api/admin/review/hide","POST",{id:Number(hide.dataset.hideReview)});
-        await loadCatalog();
-        await loadReviews(productId);
-      });
-      return;
-    }
     const add=e.target.closest("[data-add]");
     if(add)safeRun(async()=>{
-      if(!canUse()){openLink("https://t.me/atelier_customwear_2611_bot");return}
+      if(!canUse()){
+        // Inside Telegram the bot link would reopen this same chat and appear to do nothing.
+        if(initData)throw Error("Не удалось войти. Закройте витрину и откройте её заново");
+        openLink("https://t.me/atelier_customwear_2611_bot");
+        return;
+      }
       const variantId=state.selected[Number(add.dataset.add)];
       if(!variantId||state.pendingCart)return;
       state.pendingCart=true;

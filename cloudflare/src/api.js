@@ -88,6 +88,10 @@ export async function handleApi(request,env,url){
     return json({ok:true,demo:demoMode(env),manager:managerUsername(env),categories,products:withRating,variants});
   }
   if(request.method==="GET"&&path==="/api/reviews"){
+    if(!url.searchParams.has("product")){
+      const reviews=await rows(env.DB,"SELECT r.id,r.product_id,p.name AS product_name,r.author_name,r.rating,r.body,r.updated_at FROM reviews r JOIN products p ON p.id=r.product_id WHERE r.hidden=0 AND p.active=1 ORDER BY r.updated_at DESC,r.id DESC LIMIT 100");
+      return json({ok:true,reviews});
+    }
     const productId=Number(url.searchParams.get("product"));
     if(!Number.isSafeInteger(productId)||productId<1)return err("Unknown product");
     const reviews=await rows(env.DB,"SELECT id,author_name,rating,body,updated_at FROM reviews WHERE product_id=? AND hidden=0 ORDER BY updated_at DESC,id DESC LIMIT 50",productId);
@@ -98,7 +102,7 @@ export async function handleApi(request,env,url){
   const u=await verifyTelegramInitData(auth.slice(4),env.BOT_TOKEN);
   if(!u)return err("Invalid Telegram authorization",401);
   const admin=isAdmin(env,u.id);
-  if(request.method==="GET"&&path==="/api/me")return json({ok:true,user:{id:u.id,name:u.first_name},admin,demo:demoMode(env)});
+  if(request.method==="GET"&&path==="/api/me")return json({ok:true,user:{id:u.id,name:u.first_name,username:u.username},admin,demo:demoMode(env)});
   if(demoMode(env)&&!admin)return err("Demo mode: administrator only",403);
   if(path.startsWith("/api/admin/")&&!admin)return err("Administrator only",403);
 

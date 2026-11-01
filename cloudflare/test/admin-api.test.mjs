@@ -43,7 +43,7 @@ async function call(env,path,method="GET",body=null,auth=makeInitData()){
 }
 test("Telegram Mini App signed initData validates auth_date, signature and admin",async()=>{
   assert.deepEqual((await verifyTelegramInitData(makeInitData(),TOKEN))?.id,777);
-  assert.equal(await verifyTelegramInitData(makeInitData(777,Math.floor(Date.now()/1000)-900),TOKEN),null);
+  assert.equal(await verifyTelegramInitData(makeInitData(777,Math.floor(Date.now()/1000)-90000),TOKEN),null);
   assert.equal(await verifyTelegramInitData(makeInitData().replace("tester","hacker"),TOKEN),null);
   assert.equal(await verifyTelegramInitData(makeInitData(),TOKEN+"x"),null);
   assert.equal(await verifyTelegramInitData("",TOKEN),null);
@@ -529,4 +529,18 @@ test("customers review a product once, abuse can be hidden and anyone can read",
     assert.equal((await call(env,"/api/admin/review/hide","POST",{id:review.id},makeInitData(100))).status,200);
     assert.equal((await read()).length,0);
   }finally{globalThis.fetch=original}
+});
+
+test("sign-in accepts current Telegram clients that sign the signature field too",async()=>{
+  const now=Math.floor(Date.now()/1000);
+  const fields={auth_date:String(now-3600),query_id:"AAH",signature:"abc_DEF-123",user:JSON.stringify({id:555,first_name:"Игорь",username:"buyer"})};
+  const check=Object.entries(fields).sort(([a],[b])=>a.localeCompare(b,"en")).map(([k,v])=>k+"="+v).join("\n");
+  const key=createHmac("sha256","WebAppData").update(TOKEN).digest();
+  const hash=createHmac("sha256",key).update(check).digest("hex");
+  const initData=new URLSearchParams({...fields,hash}).toString();
+  const user=await verifyTelegramInitData(initData,TOKEN);
+  assert.equal(user?.id,555);
+  assert.equal(await verifyTelegramInitData(initData,"another-bot-token"),null);
+  assert.equal(await verifyTelegramInitData(initData.replace("abc_DEF","xyz_DEF"),TOKEN),null,"tampering is refused");
+  assert.equal(await verifyTelegramInitData(initData,TOKEN,now+90000),null,"a day-old session expires");
 });

@@ -45,7 +45,7 @@ jobs:
           node --test cloudflare/test/reliability.test.mjs 2>&1 | tee reliability-results.log
       - name: Upload reproducible test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reliability-test-results
           path: reliability-results.log

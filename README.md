@@ -1,5 +1,18 @@
 # Atelier Telegram Shop — бот для авторской одежды
 
+
+**Telegram Mini App + облачная инфраструктура:** каталог, индивидуальные заявки на пошив, корзина, сметы, административная панель и восстановление данных. Развёртывание на Cloudflare Workers + D1.
+
+[**Посмотреть проект в портфолио**](https://i99er-igor-portfolio.static.hf.space/cases.html#atelier) · [**Telegram-бот**](https://t.me/atelier_customwear_2611_bot) · [**Архитектура**](docs/data-model.md)
+
+<p align="center">
+  <img src="https://i99er-igor-portfolio.static.hf.space/assets/product-shots/atelier-shop.webp" width="230" alt="Каталог Telegram Mini App">
+  &nbsp;&nbsp;
+  <img src="https://i99er-igor-portfolio.static.hf.space/assets/product-shots/atelier-admin.webp" width="230" alt="Административная панель Ателье">
+</p>
+
+---
+
 Учебный, но запускаемый MVP продажи авторской одежды через Telegram: **каталог → корзина → оформление заказа**, индивидуальные заявки на пошив, административные статусы, ручной учёт финансовых операций и Excel-отчёты.
 
 ## Roadmap развития

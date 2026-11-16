@@ -13,7 +13,8 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 
 /* Header */
 .topbar{height:60px;border:0;position:sticky;top:0;z-index:10;background:#f3f0e9e6;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);margin:0 -16px;padding:0 16px}
-.wordmark{font-size:17px;font-weight:700;letter-spacing:.2em;line-height:1}
+.wordmark{display:inline-flex;align-items:center;text-decoration:none;min-height:44px;letter-spacing:0}
+.wordmark-logo{display:block;height:38px;width:auto;max-width:190px;object-fit:contain}
 .top-actions{gap:8px}
 .environment{border:1px solid var(--line);color:var(--muted);font-size:10px;font-weight:600;letter-spacing:.12em;padding:6px 9px}
 .icon-button{min-width:44px;min-height:44px;display:inline-grid;place-items:center;font-size:16px}
@@ -56,7 +57,8 @@ button,a,summary,label{touch-action:manipulation;-webkit-tap-highlight-color:tra
 button:active{opacity:.75}
 .view.active{animation:viewIn .18s ease-out}
 @keyframes viewIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-.section-heading{margin:30px 0 14px;align-items:baseline}
+.section-heading{margin:14px 0 14px;align-items:baseline}
+.hero,.hero.has-media,#demo-notice,#environment{display:none!important}
 .section-heading h2{font:600 clamp(28px,6vw,44px)/1.05 Geologica,system-ui,sans-serif;letter-spacing:-.035em;margin:6px 0 0}
 .section-count{font-size:13px}
 body.is-inner-view .hero,body.is-inner-view .notice{display:none}
@@ -266,3 +268,15 @@ footer{font-size:12px;font-weight:400;margin-top:36px;flex-wrap:wrap;border-colo
   dialog.sheet{inset:0;margin:auto;height:fit-content;border-radius:22px}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.product-image{opacity:1}}
+/* Polina Selezneva brand overrides: collection tailor select & mirrored lamb reviews background */
+.form-card select{width:100%;box-sizing:border-box;font:inherit;font-size:16px;color:var(--ink);min-height:50px;border:1px solid var(--line);border-radius:12px;padding:0 12px;background:var(--white);transition:border-color .18s,box-shadow .18s}
+.form-card select:focus{outline:0;border-color:var(--ink);box-shadow:0 0 0 1px var(--ink)}
+#view-reviews{position:relative;border-radius:18px;padding:18px 16px 28px;min-height:min(620px,76dvh);border:1px solid var(--line);background-color:#fbfaf6;background-image:linear-gradient(90deg,rgba(243,240,233,.94) 0%,rgba(243,240,233,.84) 56%,rgba(243,240,233,.22) 100%),url(/brand/reviews-bg.jpg);background-position:center,right bottom;background-size:cover,min(66vw,340px) auto;background-repeat:no-repeat}
+#view-reviews .section-heading{margin-top:0;position:relative;z-index:1}
+#reviews-page{max-width:600px;position:relative;z-index:1}
+#reviews-page .review{background:rgba(251,250,246,.88);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid rgba(220,215,204,.85);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+#reviews-page .review-form{background:rgba(251,250,246,.92);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);border:1px solid rgba(220,215,204,.85);border-radius:14px;padding:14px}
+@media(min-width:760px){
+  .wordmark-logo{height:42px;max-width:220px}
+  #view-reviews{padding:24px 28px 34px;background-image:linear-gradient(90deg,rgba(243,240,233,.95) 0%,rgba(243,240,233,.88) 48%,rgba(243,240,233,.10) 100%),url(/brand/reviews-bg.jpg);background-size:cover,contain;background-position:center,right bottom}
+}

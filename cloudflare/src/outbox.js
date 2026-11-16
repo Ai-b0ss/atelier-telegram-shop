@@ -11,6 +11,7 @@ const BACKOFF_MAX_MINUTES=360;
 
 const adminIds=env=>String(env.ADMIN_IDS||"").split(",").map(x=>Number(x.trim())).filter(x=>Number.isSafeInteger(x)&&x>0);
 const rubles=cents=>(Number(cents||0)/100).toLocaleString("ru-RU",{maximumFractionDigits:2})+" ₽";
+const statusRu={new:"Новый",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов к выдаче",shipped:"Отправлен",completed:"Завершён",canceled:"Отменён"};
 
 /** Statements for the order's own batch. orderIdSql must resolve inside that transaction. */
 export function outboxStatements(db,env,kind,customerTelegramId,orderIdSql,orderIdBinds){
@@ -36,7 +37,7 @@ async function render(env,row){
   if(row.event_type.startsWith("status_")){
     const status=row.event_type.slice("status_".length);
     if(status!==order.status)return {obsolete:true};
-    return {text:"Статус заказа №"+order.id+": "+status};
+    return {text:"Статус заказа №"+order.id+": "+(statusRu[status]||status)};
   }
   if(/^quote_[1-9]\d*$/.test(row.event_type)){
     const version=Number(row.event_type.slice(6));

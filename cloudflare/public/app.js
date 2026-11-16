@@ -8,6 +8,7 @@ const initData=app?.initData||"";
 const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const money=amount=>new Intl.NumberFormat("ru-RU",{style:"currency",currency:"RUB",minimumFractionDigits:0,maximumFractionDigits:2}).format((Number(amount)||0)/100);
 const labels={new:"Новый",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов",shipped:"Отправлен",completed:"Завершён",canceled:"Отменён"};
+const sizeLabel=s=>s==="one size"?"Единый":s;
 const next={new:["confirmed","canceled"],confirmed:["in_production","ready","canceled"],in_production:["ready","canceled"],ready:["shipped","completed","canceled"],shipped:["completed","canceled"]};
 const toast=(text,error=false)=>{const t=$("toast");t.textContent=text;t.classList.add("show");t.style.background=error?"#9f3013":"#141412";clearTimeout(window.toastTimeout);window.toastTimeout=setTimeout(()=>t.classList.remove("show"),4000);};
 async function api(path,method="GET",body){
@@ -28,8 +29,8 @@ function openLink(url){
 const isDemo=()=>state.catalog?.demo!==false;
 function applyMode(){
   const demo=isDemo();
-  $("environment").hidden=!demo;
-  $("demo-notice").hidden=!demo;
+  if($("environment"))$("environment").hidden=true;
+  if($("demo-notice"))$("demo-notice").hidden=true;
   $("checkout-submit").textContent=demo?"Создать тестовый заказ":"Оформить заказ";
 }
 const photoHtml=(p,alt=true)=>p.photo_available?
@@ -89,7 +90,7 @@ async function loadOrders(){
   if(!canUse()){$("orders-list").innerHTML='<p class="review-note">Заказы доступны в Telegram.</p>';return}
   const {orders}=await api("/api/orders");
   $("orders-list").innerHTML=orders.length?orders.map(o=>'<article class="order-card"><div class="order-top"><b>Заказ №'+Number(o.id)+'</b><span>'+esc(reviewDate(o.created_at))+'</span></div>'+
-    (o.kind==="custom"?'<p>Пошив: '+esc(String(o.custom_details||"").slice(0,120))+'</p>':o.items.map(x=>'<p>'+esc(x.name)+', '+esc(x.size)+' × '+Number(x.quantity)+'</p>').join(""))+
+    (o.kind==="custom"?'<p>Пошив: '+esc(String(o.custom_details||"").slice(0,120))+'</p>':o.items.map(x=>'<p>'+esc(x.name)+', '+esc(sizeLabel(x.size))+' × '+Number(x.quantity)+'</p>').join(""))+
     (Number(o.total_cents)?'<p class="order-sum">'+money(o.total_cents)+'</p>':'<p class="order-sum">Цена согласуется</p>')+
     (o.status==="canceled"?'<p class="order-canceled">Заказ отменён</p>':orderSteps(o))+
     (o.managerUrl&&o.status!=="canceled"&&o.status!=="completed"?'<a class="quiet" href="'+esc(o.managerUrl)+'" data-manager-link>Написать менеджеру</a>':'')+
@@ -97,14 +98,25 @@ async function loadOrders(){
 }
 const categoryName=id=>state.catalog?.categories?.find(c=>c.id===id)?.name||"Коллекция";
 const CATALOG_KEY="atelier-catalog";
+function syncTailorProducts(){
+  const sel=$("tailor-product");
+  if(!sel)return;
+  const products=(state.catalog?.products||[]);
+  const prev=sel.value;
+  sel.innerHTML=products.length?products.map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join(""):'<option value="">Нет доступных изделий</option>';
+  if(prev&&products.some(p=>String(p.id)===String(prev)))sel.value=prev;
+}
 function showCatalog(){
   applyMode();
+  const inStockIds=new Set((state.catalog.variants||[]).filter(v=>Number(v.stock)>0).map(v=>v.product_id));
+  const stocked=new Set(state.catalog.products.filter(p=>inStockIds.size?inStockIds.has(p.id):true).map(p=>p.category_id));
+  if(state.category&&!stocked.has(state.category))state.category=0;
   $("product-count").textContent=productCountLabel(state.catalog.products.length);
-  const stocked=new Set(state.catalog.products.map(p=>p.category_id));
-  const categories=[{id:0,name:"Всё"},...state.catalog.categories.filter(c=>stocked.has(c.id))];
+  const nonEmptyCats=state.catalog.categories.filter(c=>stocked.has(c.id));
+  const categories=nonEmptyCats.length?[{id:0,name:"Всё"},...nonEmptyCats]:[];
   $("filters").innerHTML=categories.map(c=>'<button data-cat="'+c.id+'" aria-pressed="'+(state.category===c.id)+'" class="'+(state.category===c.id?"selected":"")+'">'+esc(c.name)+'</button>').join("");
+  syncTailorProducts();
   renderProducts();
-  renderHero();
 }
 async function loadCatalog(){
   state.catalog=await api("/api/catalog");
@@ -219,7 +231,7 @@ function openSheet(productId){
     galleryHtml(p)+'<div class="sheet-body"><h3 id="sheet-title">'+esc(p.name)+'</h3>'+
     '<div class="sheet-price">'+(choice?money(choice.price_cents):"Нет в наличии")+'</div>'+
     (p.description?'<p>'+esc(p.description)+'</p>':'')+
-    (variants.length?'<span class="sheet-label">Размер и цвет</span><div class="variants">'+variants.map(v=>'<button type="button" class="variant-pill '+(choice.id===v.id?"selected":"")+'" aria-pressed="'+(choice.id===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'">'+esc(v.size)+'<small>'+esc(v.color)+'</small></button>').join("")+'</div>':'')+
+    (variants.length?'<span class="sheet-label">Размер и цвет</span><div class="variants">'+variants.map(v=>'<button type="button" class="variant-pill '+(choice.id===v.id?"selected":"")+'" aria-pressed="'+(choice.id===v.id)+'" data-choice="'+v.id+'" data-product="'+p.id+'">'+esc(sizeLabel(v.size))+'<small>'+esc(v.color)+'</small></button>').join("")+'</div>':'')+
     (p.size_chart?'<details class="size-chart"'+(chartOpen?" open":"")+'><summary>Таблица размеров</summary><img alt="Таблица размеров: талия, бёдра, посадка и длина в сантиметрах" decoding="async" src="'+esc(p.size_chart)+'"></details>':'')+
     '<div class="stock-hint">'+(choice&&choice.stock<=3?(choice.stock===1?"Последняя вещь":"Осталось: "+choice.stock):"")+'</div>'+
     '<button type="button" class="primary" data-add="'+p.id+'" '+(variants.length?"":"disabled")+'>'+action+'</button>'+reviewsHtml(p)+'</div>';
@@ -296,7 +308,7 @@ async function loadCart(){
   }
   const hasUnavailable=state.cart.items.some(x=>Number(x.available)===0);
   $("cart-body").innerHTML=(hasUnavailable?'<div class="notice" role="alert">Некоторые изделия недоступны или их осталось меньше, чем в корзине. Уменьшите количество или удалите эти позиции перед оформлением.</div>':"")+
-    state.cart.items.map(x=>'<div class="cart-row"><span class="cart-thumb">'+photoHtml(x,false)+'</span><div class="cart-info"><b>'+esc(x.name)+'</b><small>'+esc(x.size)+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small>'+
+    state.cart.items.map(x=>'<div class="cart-row"><span class="cart-thumb">'+photoHtml(x,false)+'</span><div class="cart-info"><b>'+esc(x.name)+'</b><small>'+esc(sizeLabel(x.size))+' · '+esc(x.color)+' · '+money(x.price_cents)+'</small>'+
     (Number(x.available)===0?'<small class="error">Временно недоступно — уменьшите количество или удалите</small>':"")+
     '</div><div class="qty-buttons">'+
     '<button data-qty="'+x.variant_id+'" data-delta="-1" aria-label="Уменьшить">−</button><span>'+x.quantity+'</span>'+
@@ -329,7 +341,7 @@ function renderPanel(){
       const vs=d.variants.filter(x=>x.product_id===p.id);
       return '<article class="stock-card'+(p.active?"":" is-hidden")+'"><div class="stock-head">'+(p.images?.[0]?'<img alt="" loading="lazy" src="'+esc(p.images[0])+'">':'<span class="stock-nophoto">Нет фото</span>')+
         '<div><b>'+esc(p.name)+'</b><small>'+esc(p.category_name)+' · '+(p.active?"в каталоге":"скрыта")+'</small></div></div>'+
-        '<div class="stock-sizes">'+vs.map(v=>'<button class="size-chip'+(v.stock>0&&v.active?"":" is-out")+'" data-variant="'+v.id+'">'+esc(v.size)+' · '+v.stock+' шт. · '+money(v.price_cents)+'</button>').join("")+'<button class="size-chip" data-new-variant="'+p.id+'">+ Размер</button></div>'+
+        '<div class="stock-sizes">'+vs.map(v=>'<button class="size-chip'+(v.stock>0&&v.active?"":" is-out")+'" data-variant="'+v.id+'">'+esc(sizeLabel(v.size))+' · '+v.stock+' шт. · '+money(v.price_cents)+'</button>').join("")+'<button class="size-chip" data-new-variant="'+p.id+'">+ Размер</button></div>'+
         '<div class="stock-actions"><button class="link-action" data-product-edit="'+p.id+'">Изменить</button><button class="link-action" data-photo-product="'+p.id+'">Добавить фото ↗</button><button class="link-action" data-toggle-product="'+p.id+'">'+(p.active?"Скрыть":"Показать")+'</button></div></article>';
     }).join("");
   if(state.panel==="settings"){
@@ -385,7 +397,7 @@ function openEditor(kind,id=0,selectedProductId=0){
       '<label><input type="checkbox" name="active" '+(p.active?"checked":"")+' style="width:auto;display:inline"> Показывать в каталоге</label>';
   }else if(kind==="variant"){
     const v=d.variants.find(x=>x.id===id);
-    const current=v||{product_id:selectedProductId,sku:"",size:"one size",color:"",price_cents:0,cost_cents:0,stock:0,active:1};
+    const current=v||{product_id:selectedProductId,sku:"",size:"Единый",color:"",price_cents:0,cost_cents:0,stock:0,active:1};
     $("editor-title").textContent=v?"Изменить вариант":"Новый вариант";
     html='<label>Изделие<select name="productId">'+d.products.map(x=>'<option value="'+x.id+'" '+(x.id===current.product_id?"selected":"")+'>'+esc(x.name)+'</option>').join("")+'</select></label>'+
       field("Артикул (можно оставить пустым)","sku",current.sku,"text",false)+field("Размер","size",current.size)+field("Цвет","color",current.color)+
@@ -615,10 +627,15 @@ async function init(){
     safeRun(async()=>{
       if(!canUse())throw Error(isDemo()?"Заявки скоро откроются":"Откройте магазин через Telegram");
       const fd=new FormData(form);
+      const productId=Number(fd.get("productId")||0);
+      const chosen=(state.catalog?.products||[]).find(p=>p.id===productId);
+      if(!chosen)throw Error("Выберите изделие из текущей коллекции");
+      const rawDesc=String(fd.get("description")||"").trim();
+      const fullDesc=rawDesc.startsWith("Изделие:")?rawDesc:"Изделие: "+chosen.name+" — "+rawDesc;
       state.tailorRequestKey ||= crypto.randomUUID().replace(/-/g,"");
-      const result=await api("/api/custom","POST",{...Object.fromEntries(fd),requestKey:state.tailorRequestKey});
+      const result=await api("/api/custom","POST",{...Object.fromEntries(fd),productId,description:fullDesc,requestKey:state.tailorRequestKey});
       state.tailorRequestKey=null;
-      form.reset();showDone(doneCopy(result,"custom"));
+      form.reset();syncTailorProducts();showDone(doneCopy(result,"custom"));
     }).finally(()=>{if(submit)submit.disabled=false})
   });
   $("panel-tabs").addEventListener("click",e=>{const b=e.target.closest("[data-panel]");if(b){state.panel=b.dataset.panel;renderPanel()}});

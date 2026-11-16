@@ -10,6 +10,7 @@ const nextStatuses = {
   shipped:["completed","canceled"],completed:[],canceled:[]
 };
 const ru={new:"Новый",confirmed:"Подтверждён",in_production:"В работе",ready:"Готов",shipped:"Отправлен",completed:"Завершён",canceled:"Отменён"};
+const kindRu={catalog:"каталог",custom:"пошив"};
 const rub=n=>(Number(n||0)/100).toLocaleString("ru-RU",{minimumFractionDigits:2,maximumFractionDigits:2})+" ₽";
 const adminIds=env=>new Set(String(env.ADMIN_IDS||"").split(",").map(s=>Number(s.trim())).filter(Number.isSafeInteger));
 const demo=demoMode;
@@ -27,14 +28,12 @@ const textLimit=(s,n)=>String(s||"").trim().slice(0,n);
 const SHOP="https://atelier-customwear-demo-2026.igorekglukhovskii43.workers.dev";
 const PICKUP_ASK="Когда удобно забрать вещь у метро Беляево? Напишите дату и время, например: 18 ноября, 15:00.";
 const COMMANDS=[
-  ["start","Главное меню"],["catalog","Каталог с фото"],["cart","Корзина"],["orders","Мои заказы"],
-  ["custom","Заказать пошив"],["reviews","Отзывы покупателей"],["help","Что умеет бот"],["privacy","Данные и условия"],["cancel","Отменить ввод"]
+  ["start","Открыть витрину polinaseleznëva"]
 ];
-const HELP="Что можно сделать:\n\n/catalog — посмотреть вещи с фото и выбрать размер\n/cart — корзина и оформление заказа\n/custom — заказать пошив по своей идее\n/orders — ваши заказы\n/reviews — отзывы покупателей\n/privacy — данные и условия\n/cancel — отменить ввод\n\nОплату и встречу у метро Беляево вы согласуете с менеджером в Telegram: @onlyrazor.";
+const CHANNEL_URL="https://t.me/polInasele3neva";
+const HELP="Вся работа с коллекцией, корзиной, индивидуальным пошивом и отзывами проходит в мини-приложении polinaseleznëva.\n\nНажмите /start, чтобы открыть витрину.\nКанал бренда: https://t.me/polInasele3neva\nМенеджер: @onlyrazor\n/privacy — условия и удаление данных (/forgetme).";
 const MENU={"🛍 Каталог":"catalog","🧺 Корзина":"cart","✂️ Пошив":"custom","📦 Мои заказы":"orders","⭐ Отзывы":"reviews","💬 Менеджер":"manager","❓ Помощь":"help"};
-const MENU_KEYBOARD={keyboard:[["🛍 Каталог","🧺 Корзина"],["✂️ Пошив","📦 Мои заказы"],["⭐ Отзывы","💬 Менеджер"],["❓ Помощь"]].map(row=>row.map(text=>({text}))),
-  resize_keyboard:true,is_persistent:true,input_field_placeholder:"Выберите раздел внизу"};
-const AVATAR_VERSION="signature-1";
+const AVATAR_VERSION="polina-selezneva-2";
 const chatPhoto=path=>SHOP+String(path).replace(/\.webp$/,".jpg");
 const firstImage=p=>{try{return JSON.parse(p.images||"[]")[0]||null}catch{return null}};
 export function makeHandler(env) {
@@ -112,9 +111,10 @@ export function makeHandler(env) {
   // Bot profile settings live in Telegram, so they are applied from here where the token is available.
   async function setupBot(){
     const steps=[
+      ["имя",()=>api("setMyName",{name:"polinaseleznëva"})],
       ["команды",()=>api("setMyCommands",{commands:COMMANDS.map(([command,description])=>({command,description}))})],
-      ["описание",()=>api("setMyDescription",{description:"Авторская одежда и пошив по вашей идее. Самовывоз у метро Беляево, детали с менеджером в Telegram. Нажмите «Старт»."})],
-      ["короткое описание",()=>api("setMyShortDescription",{short_description:"Авторская одежда и пошив. Самовывоз у метро Беляево."})],
+      ["описание",()=>api("setMyDescription",{description:"polinaseleznëva — коллекция авторской одежды и индивидуальный пошив по моделям бренда. Откройте мини-приложение по кнопке ниже. Канал: https://t.me/polInasele3neva"})],
+      ["короткое описание",()=>api("setMyShortDescription",{short_description:"polinaseleznëva — авторская одежда и пошив. Канал: t.me/polInasele3neva"})],
       ["кнопка витрины",()=>api("setChatMenuButton",{menu_button:{type:"web_app",text:"Витрина",web_app:{url:SHOP+"/app"}}})],
       ["аватарка",uploadAvatar]
     ];
@@ -124,9 +124,10 @@ export function makeHandler(env) {
     }
     return report.join("\n");
   }
+  const appOnlyMarkup=()=>({inline_keyboard:[[shopButton("Открыть polinaseleznëva")],[{text:"Telegram-канал бренда",url:CHANNEL_URL}]]});
   const home=async id=>{
-    await send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"Привет! Это ателье авторской одежды.\n\nРазделы — на кнопках внизу экрана. Выберите вещь, оформите заказ или пошив, а об оплате и встрече у метро Беляево договоритесь с менеджером.",MENU_KEYBOARD);
-    return send(id,"Вещи с фото и отзывы удобнее смотреть в витрине:",{inline_keyboard:[[shopButton("Открыть витрину")]]});
+    await send(id,(demo(env)?"ДЕМО-РЕЖИМ: товары тестовые, реальные заказы не принимаются.\n":"")+"polinaseleznëva — авторская одежда и пошив.\n\nВесь каталог, корзина, пошив по моделям коллекции и отзывы работают внутри мини-приложения.",{remove_keyboard:true});
+    return send(id,"Откройте витрину по кнопке ниже:",appOnlyMarkup());
   };
   async function catalogue(id) {
     const cs=await rows(db,"SELECT c.id,c.name,COUNT(p.id) AS items FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.active=1 GROUP BY c.id ORDER BY c.name");
@@ -143,7 +144,7 @@ export function makeHandler(env) {
   async function allMine(id,u){
     const c=await customer(u);
     const orders=await rows(db,"SELECT id,kind,status,total_cents FROM orders WHERE customer_id=? ORDER BY id DESC LIMIT 20",c.id);
-    await send(id,orders.length?"Ваши заказы:\n"+orders.map(o=>"№"+o.id+" · "+o.kind+" · "+ru[o.status]+" · "+(o.total_cents?rub(o.total_cents):"цена согласуется")).join("\n"):"Заказов ещё нет.");
+    await send(id,orders.length?"Ваши заказы:\n"+orders.map(o=>"№"+o.id+" · "+(kindRu[o.kind]||o.kind)+" · "+ru[o.status]+" · "+(o.total_cents?rub(o.total_cents):"цена согласуется")).join("\n"):"Заказов ещё нет.");
   }
   async function checkout(id,u,data,addr) {
     const c=await customer(u);
@@ -310,12 +311,12 @@ export function makeHandler(env) {
       const filter=p[1],valid=!filter||statuses.includes(filter);
       if(!valid)return send(id,"Неизвестный статус.");
       const orders=filter?await rows(db,"SELECT id,kind,status,total_cents FROM orders WHERE status=? ORDER BY id DESC LIMIT 30",filter):await rows(db,"SELECT id,kind,status,total_cents FROM orders ORDER BY id DESC LIMIT 30");
-      return send(id,orders.length?"Заказы:\n"+orders.map(o=>"№"+o.id+" "+ru[o.status]+" "+o.kind+" "+rub(o.total_cents)+" · /order "+o.id).join("\n"):"Заказов нет.");
+      return send(id,orders.length?"Заказы:\n"+orders.map(o=>"№"+o.id+" "+ru[o.status]+" "+(kindRu[o.kind]||o.kind)+" "+rub(o.total_cents)+" · /order "+o.id).join("\n"):"Заказов нет.");
     }
     if(cmd==="/order"){
       const oid=safeInt(p[1]);if(!oid)return send(id,"Пример: /order 1");
       const o=await first(db,"SELECT o.*,c.telegram_id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?",oid);
-      return send(id,o?"№"+o.id+" "+ru[o.status]+" "+o.kind+"\nЦена: "+rub(o.total_cents)+"\nКонтакт: "+o.contact_name+" "+o.contact_phone+"\nДоставка: "+o.delivery_address+"\n"+(o.kind==="custom"?"Пошив: "+o.custom_details+"\nМерки: "+o.custom_measurements:""):"Заказ не найден.");
+      return send(id,o?"№"+o.id+" "+ru[o.status]+" "+(kindRu[o.kind]||o.kind)+"\nЦена: "+rub(o.total_cents)+"\nКонтакт: "+o.contact_name+" "+o.contact_phone+"\nДоставка: "+o.delivery_address+"\n"+(o.kind==="custom"?"Пошив: "+o.custom_details+"\nМерки: "+o.custom_measurements:""):"Заказ не найден.");
     }
     if(cmd==="/status"){
       const oid=safeInt(p[1]);const status=p[2];
@@ -498,15 +499,9 @@ export function makeHandler(env) {
     if(!txt)return;
     const pressed=MENU[txt];
     if(pressed){
-      // A menu button always wins over a half-finished form.
       await delSession(id);
-      if(pressed==="catalog")return catalogue(id);
-      if(pressed==="cart")return cart(id,u);
-      if(pressed==="custom")return startCustom(id);
-      if(pressed==="orders")return allMine(id,u);
-      if(pressed==="reviews")return reviewsMessage(id);
-      if(pressed==="manager")return send(id,"Вопрос по вещи, размеру или встрече? Напишите менеджеру:",{inline_keyboard:[[{text:"Написать менеджеру",url:"https://t.me/"+String(env.MANAGER_USERNAME||"onlyrazor").replace(/^@/,"")}]]});
-      return send(id,HELP);
+      await send(id,"Меню перенесено в мини-приложение polinaseleznëva.",{remove_keyboard:true});
+      return send(id,"Откройте витрину по кнопке ниже:",appOnlyMarkup());
     }
     const cmd=txt.split(/\s+/)[0].split("@")[0].toLowerCase();
     if(cmd==="/start"){
@@ -519,26 +514,16 @@ export function makeHandler(env) {
       if(!admins.has(id))return send(id,"Доступ запрещён.");
       return beginProductPhoto(id,safeInt(txt.split(/\s+/)[1]));
     }
-    if(cmd==="/help")return send(id,HELP);
-    if(cmd==="/catalog"){await delSession(id);return catalogue(id)}
-    if(cmd==="/cart"){await delSession(id);return cart(id,u)}
-    if(cmd==="/orders"){await delSession(id);return allMine(id,u)}
-    if(cmd==="/custom")return startCustom(id);
     if(cmd==="/setup"){
       if(!admins.has(id))return send(id,"Доступ запрещён.");
       return send(id,await setupBot());
     }
-    if(cmd==="/cancel"){await delSession(id);return send(id,"Ввод отменён. /start — главное меню.")}
+    if(cmd==="/cancel"){await delSession(id);return send(id,"Ввод отменён. Откройте витрину через /start.")}
     if(cmd==="/privacy")return send(id,"Храним данные Telegram, контакты, сведения о заказах и мерках в Cloudflare D1. Данные видны администратору. Оплаты учитываются только вручную. /forgetme — обезличить закрытые заказы.");
-    if(cmd==="/reviews")return reviewsMessage(id);
     if(cmd==="/forgetme"){
       const c=await customer(u);
       const open=await first(db,"SELECT COUNT(*) n FROM orders WHERE customer_id=? AND status NOT IN ('completed','canceled')",c.id);
       if(open.n>0)return send(id,"У вас есть незавершённые заказы. Свяжитесь с менеджером для удаления.");
-      // Customer identity is their positive Telegram ID. Blank names alone
-      // are not anonymization while orders still link to that ID. Retain the
-      // internal accounting customer row, but pseudonymize its external key
-      // with a unique negative internal ID (legitimate Telegram IDs > 0).
       await db.batch([
         db.prepare("DELETE FROM custom_attachments WHERE order_id IN (SELECT id FROM orders WHERE customer_id=?)").bind(c.id),
         db.prepare("UPDATE orders SET contact_name='',contact_phone='',delivery_address='',custom_details='',custom_measurements='' WHERE customer_id=?").bind(c.id),
@@ -551,10 +536,17 @@ export function makeHandler(env) {
       ]);
       return send(id,"Контакты, мерки и связь закрытых заказов с вашим Telegram ID удалены. Учётные записи операций сохраняются без ваших контактных данных.");
     }
-    if(cmd.startsWith("/")&&["/admin","/orders","/order","/status","/quote","/payment","/report","/stats"].includes(cmd))
-      return admins.has(u.id)?adminCommand(id,u,txt):send(id,"Доступ запрещён.");
+    if(cmd.startsWith("/")&&["/admin","/orders","/order","/status","/return","/quote","/payment","/report","/stats"].includes(cmd)){
+      if(admins.has(u.id))return adminCommand(id,u,txt);
+      if(cmd==="/orders"){await delSession(id);return send(id,"История и статусы заказов доступны в мини-приложении:",appOnlyMarkup())}
+      return send(id,"Доступ запрещён.");
+    }
+    if(["/help","/catalog","/cart","/custom","/reviews"].includes(cmd)){
+      await delSession(id);
+      return send(id,HELP,appOnlyMarkup());
+    }
     if(await flowMessage(id,u,txt))return;
-    return send(id,"Не понял сообщение. Все команды: /help");
+    return send(id,"Все покупки, пошив и отзывы доступны в мини-приложении polinaseleznëva:",appOnlyMarkup());
   }
   return {
     syncAvatar,
@@ -644,8 +636,8 @@ export default {
         const clientStatus=e?.name==="RequestBodyError"&&[400,413].includes(e.status)
           ?e.status:e instanceof SyntaxError?400:0;
         if(!clientStatus)console.error("Mini App API request failed:",e?.name||"Unknown");
-        return Response.json({ok:false,error:clientStatus===413?"Request body too large":
-          clientStatus===400?"Invalid JSON":"Server error"},
+        return Response.json({ok:false,error:clientStatus===413?"Слишком большой объём запроса":
+          clientStatus===400?"Некорректный формат данных JSON":"Внутренняя ошибка сервера"},
           {status:clientStatus||500,headers:{"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}});
       }
     }
